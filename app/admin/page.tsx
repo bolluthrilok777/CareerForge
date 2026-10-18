@@ -183,6 +183,8 @@ export default function MobileAdminCommandCenter() {
 
   // Emergency / Per-Round Booking Modal State
   const [isEmergencyModalOpen, setIsEmergencyModalOpen] = useState(false);
+  const [isEmergencyCustomRound, setIsEmergencyCustomRound] = useState(false);
+  const [emergencyCustomRoundText, setEmergencyCustomRoundText] = useState('');
   const [emergencyForm, setEmergencyForm] = useState({
     candidate_name: '',
     whatsapp_number: '',
@@ -194,6 +196,20 @@ export default function MobileAdminCommandCenter() {
   });
   const [isSubmittingEmergency, setIsSubmittingEmergency] = useState(false);
   const [emergencyError, setEmergencyError] = useState<string | null>(null);
+
+  // Edit Candidate Details (Admin Master Power) Modal State
+  const [editingClientModal, setEditingClientModal] = useState<DatabaseClient | null>(null);
+  const [editClientForm, setEditClientForm] = useState({
+    full_name: '',
+    whatsapp_number: '',
+    tech_stack: '',
+    current_ctc_lpa: '',
+    client_type: 'full_package',
+    fee_status: 'registration_paid_20k',
+    naukri_status: 'in_progress',
+    notes: '',
+  });
+  const [isSavingClientEdit, setIsSavingClientEdit] = useState(false);
 
   // Restore auth
   useEffect(() => {
@@ -668,6 +684,10 @@ export default function MobileAdminCommandCenter() {
     e.preventDefault();
     setEmergencyError(null);
 
+    const effectiveRoundType = isEmergencyCustomRound
+      ? emergencyCustomRoundText.trim()
+      : emergencyForm.round_type;
+
     const cleanPhone = emergencyForm.whatsapp_number.replace(/\D/g, '');
     if (cleanPhone.length < 10) {
       setEmergencyError('Please enter a valid 10-digit WhatsApp number.');
@@ -675,6 +695,10 @@ export default function MobileAdminCommandCenter() {
     }
     if (!emergencyForm.candidate_name.trim() || !emergencyForm.company_name.trim()) {
       setEmergencyError('Candidate name and company name are required.');
+      return;
+    }
+    if (isEmergencyCustomRound && !emergencyCustomRoundText.trim()) {
+      setEmergencyError('Please enter the custom round type name.');
       return;
     }
 
@@ -710,7 +734,7 @@ export default function MobileAdminCommandCenter() {
         const clientPayload = {
           full_name: emergencyForm.candidate_name.trim(),
           whatsapp_number: cleanPhone,
-          tech_stack: `${emergencyForm.round_type} (Emergency Support)`,
+          tech_stack: `${effectiveRoundType} (Emergency Support)`,
           current_ctc_lpa: '14.0',
           fee_status: 'offer_locked' as const,
           naukri_status: 'in_progress',
@@ -737,7 +761,7 @@ export default function MobileAdminCommandCenter() {
         client_id: clientId,
         candidate_name: emergencyForm.candidate_name.trim(),
         company_name: emergencyForm.company_name.trim(),
-        round_type: emergencyForm.round_type,
+        round_type: effectiveRoundType,
         scheduled_date: emergencyForm.scheduled_date,
         scheduled_time: emergencyForm.scheduled_time,
         priority: 'urgent',
@@ -775,13 +799,15 @@ export default function MobileAdminCommandCenter() {
         scheduled_date: '2026-10-21',
         scheduled_time: '02:30 PM IST',
       });
+      setIsEmergencyCustomRound(false);
+      setEmergencyCustomRoundText('');
     } catch {
       // Offline fallback
       const fallbackClient: DatabaseClient = {
         id: `cli-${Date.now()}`,
         full_name: emergencyForm.candidate_name.trim(),
         whatsapp_number: cleanPhone,
-        tech_stack: `${emergencyForm.round_type} (Emergency Support)`,
+        tech_stack: `${effectiveRoundType} (Emergency Support)`,
         current_ctc_lpa: '14.0',
         fee_status: 'offer_locked',
         naukri_status: 'in_progress',
@@ -796,7 +822,7 @@ export default function MobileAdminCommandCenter() {
         client_id: fallbackClient.id,
         candidate_name: emergencyForm.candidate_name.trim(),
         company_name: emergencyForm.company_name.trim(),
-        round_type: emergencyForm.round_type,
+        round_type: effectiveRoundType,
         scheduled_date: emergencyForm.scheduled_date,
         scheduled_time: emergencyForm.scheduled_time,
         priority: 'urgent',
@@ -813,6 +839,94 @@ export default function MobileAdminCommandCenter() {
       setIsEmergencyModalOpen(false);
     } finally {
       setIsSubmittingEmergency(false);
+    }
+  };
+
+  // Open Master Edit Client Modal
+  const handleOpenEditClientModal = (client: DatabaseClient) => {
+    setEditingClientModal(client);
+    setEditClientForm({
+      full_name: client.full_name || '',
+      whatsapp_number: client.whatsapp_number || '',
+      tech_stack: client.tech_stack || '',
+      current_ctc_lpa: String(client.current_ctc_lpa || '14.0'),
+      client_type: client.client_type || 'full_package',
+      fee_status: client.fee_status || 'registration_paid_20k',
+      naukri_status: client.naukri_status || client.profiles_status || 'in_progress',
+      notes: client.notes || '',
+    });
+  };
+
+  // Save Master Edit Client
+  const handleSaveClientEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingClientModal?.id) return;
+    if (!editClientForm.full_name.trim() || !editClientForm.whatsapp_number.trim()) {
+      showToast('Full name and WhatsApp number are required.');
+      return;
+    }
+
+    setIsSavingClientEdit(true);
+    const updatedClient: DatabaseClient = {
+      ...editingClientModal,
+      full_name: editClientForm.full_name.trim(),
+      whatsapp_number: editClientForm.whatsapp_number.trim(),
+      tech_stack: editClientForm.tech_stack.trim() || 'Software Engineer',
+      current_ctc_lpa: editClientForm.current_ctc_lpa.trim() || '14.0',
+      client_type: editClientForm.client_type,
+      fee_status: editClientForm.fee_status as DatabaseClient['fee_status'],
+      naukri_status: editClientForm.naukri_status,
+      linkedin_status: editClientForm.naukri_status,
+      profiles_status: editClientForm.naukri_status,
+      notes: editClientForm.notes.trim() || null,
+    };
+
+    try {
+      await supabase
+        .from('clients')
+        .update({
+          full_name: updatedClient.full_name,
+          whatsapp_number: updatedClient.whatsapp_number,
+          tech_stack: updatedClient.tech_stack,
+          current_ctc_lpa: updatedClient.current_ctc_lpa,
+          client_type: updatedClient.client_type,
+          fee_status: updatedClient.fee_status,
+          naukri_status: updatedClient.naukri_status,
+          linkedin_status: updatedClient.linkedin_status,
+          notes: updatedClient.notes,
+        })
+        .eq('id', editingClientModal.id);
+
+      // If name was updated, synchronize candidate name across their interview slots
+      if (updatedClient.full_name !== editingClientModal.full_name) {
+        await supabase
+          .from('interview_slots')
+          .update({ candidate_name: updatedClient.full_name })
+          .eq('client_id', editingClientModal.id);
+
+        setSlots((prev) =>
+          prev.map((s) =>
+            s.client_id === editingClientModal.id
+              ? { ...s, candidate_name: updatedClient.full_name }
+              : s
+          )
+        );
+      }
+
+      setClients((prev) =>
+        prev.map((c) => (c.id === editingClientModal.id ? updatedClient : c))
+      );
+      broadcastSync('CLIENT_UPDATED', { clientId: editingClientModal.id });
+      showToast(`Master update saved for ${updatedClient.full_name}`);
+      setEditingClientModal(null);
+    } catch {
+      setClients((prev) =>
+        prev.map((c) => (c.id === editingClientModal.id ? updatedClient : c))
+      );
+      showToast('Master update saved locally.');
+      setEditingClientModal(null);
+    } finally {
+      setIsSavingClientEdit(false);
     }
   };
 
@@ -1276,6 +1390,16 @@ export default function MobileAdminCommandCenter() {
                               <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
                             </a>
 
+                            {/* Edit Candidate Profile button (Admin Power) */}
+                            <button
+                              type="button"
+                              title="Edit candidate profile & controls"
+                              onClick={() => handleOpenEditClientModal(c)}
+                              className="p-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white rounded-lg border border-zinc-800 transition-colors"
+                            >
+                              <Edit3 className="w-3.5 h-3.5 text-zinc-400" />
+                            </button>
+
                             {/* Note button */}
                             <button
                               type="button"
@@ -1717,10 +1841,15 @@ export default function MobileAdminCommandCenter() {
                     Round Type *
                   </label>
                   <select
-                    value={emergencyForm.round_type}
-                    onChange={(e) =>
-                      setEmergencyForm({ ...emergencyForm, round_type: e.target.value })
-                    }
+                    value={isEmergencyCustomRound ? 'Custom' : emergencyForm.round_type}
+                    onChange={(e) => {
+                      if (e.target.value === 'Custom') {
+                        setIsEmergencyCustomRound(true);
+                      } else {
+                        setIsEmergencyCustomRound(false);
+                        setEmergencyForm({ ...emergencyForm, round_type: e.target.value });
+                      }
+                    }}
                     className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
                   >
                     <option value="Technical Coding L1">Technical Coding L1</option>
@@ -1728,9 +1857,27 @@ export default function MobileAdminCommandCenter() {
                     <option value="Screening Round">Screening Round</option>
                     <option value="Hiring Manager L3">Hiring Manager L3</option>
                     <option value="HR Discussion">HR Discussion</option>
+                    <option value="Custom">Custom (Enter manually)...</option>
                   </select>
                 </div>
               </div>
+
+              {/* Custom Round Type Input if selected */}
+              {isEmergencyCustomRound && (
+                <div>
+                  <label className="block text-[11px] font-bold text-emerald-400 mb-1">
+                    Custom Round Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={emergencyCustomRoundText}
+                    onChange={(e) => setEmergencyCustomRoundText(e.target.value)}
+                    placeholder="e.g. Director Round, Assignment Review, Live Architecture"
+                    className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+              )}
 
               {/* Agreed Round Fee */}
               <div>
@@ -1877,6 +2024,190 @@ export default function MobileAdminCommandCenter() {
                       <span>Approve & Book Slot</span>
                     </>
                   )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL: ADMIN MASTER EDIT CANDIDATE (OVERRIDE POWER)      */}
+      {/* ======================================================== */}
+      {editingClientModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#121214] rounded-3xl max-w-md w-full p-6 border border-zinc-800 shadow-2xl space-y-4 text-white max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-white">
+                  <Edit3 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-white">
+                    Master Edit Candidate
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Administrator authority & profile override
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingClientModal(null)}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveClientEdit} className="space-y-3.5">
+              {/* Full Name & WhatsApp */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Candidate Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editClientForm.full_name}
+                    onChange={(e) =>
+                      setEditClientForm({ ...editClientForm, full_name: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    WhatsApp Number *
+                  </label>
+                  <input
+                    type="tel"
+                    required
+                    value={editClientForm.whatsapp_number}
+                    onChange={(e) =>
+                      setEditClientForm({ ...editClientForm, whatsapp_number: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Primary Role / Tech Stack */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Primary Tech Stack / Track *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editClientForm.tech_stack}
+                  onChange={(e) =>
+                    setEditClientForm({ ...editClientForm, tech_stack: e.target.value })
+                  }
+                  placeholder="e.g. Java Full Stack / Spring Boot / React"
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              {/* CTC & Client Tier */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Current CTC (LPA)
+                  </label>
+                  <input
+                    type="text"
+                    value={editClientForm.current_ctc_lpa}
+                    onChange={(e) =>
+                      setEditClientForm({ ...editClientForm, current_ctc_lpa: e.target.value })
+                    }
+                    placeholder="e.g. 14.5"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Client Tier *
+                  </label>
+                  <select
+                    value={editClientForm.client_type}
+                    onChange={(e) =>
+                      setEditClientForm({ ...editClientForm, client_type: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                  >
+                    <option value="full_package">Full Retainer Client</option>
+                    <option value="per_round">Emergency Per-Round</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Milestone & Profiles Status */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Fee Status Milestone
+                  </label>
+                  <select
+                    value={editClientForm.fee_status}
+                    onChange={(e) =>
+                      setEditClientForm({ ...editClientForm, fee_status: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                  >
+                    <option value="registration_paid_20k">Registration Paid</option>
+                    <option value="offer_locked">Offer Stage Locked</option>
+                    <option value="final_12_percent_paid">Final 12% Settled</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Job Profiles Status
+                  </label>
+                  <select
+                    value={editClientForm.naukri_status}
+                    onChange={(e) =>
+                      setEditClientForm({ ...editClientForm, naukri_status: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                  >
+                    <option value="in_progress">In Progress</option>
+                    <option value="Optimized">Optimized</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Operational Notes */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Operational Notes
+                </label>
+                <textarea
+                  rows={3}
+                  value={editClientForm.notes}
+                  onChange={(e) =>
+                    setEditClientForm({ ...editClientForm, notes: e.target.value })
+                  }
+                  placeholder="e.g. Target companies: Wells Fargo, Oracle, Swiggy. Focus on System Design."
+                  className="w-full bg-black border border-zinc-800 rounded-xl p-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingClientModal(null)}
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingClientEdit}
+                  className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors"
+                >
+                  {isSavingClientEdit ? 'Saving Master...' : 'Save Master Details'}
                 </button>
               </div>
             </form>

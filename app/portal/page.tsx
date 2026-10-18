@@ -17,7 +17,9 @@ import {
   Building,
   ChevronRight,
   AlertTriangle,
-  MessageCircle
+  MessageCircle,
+  Edit3,
+  User
 } from 'lucide-react';
 import {
   supabase,
@@ -146,6 +148,20 @@ export default function CandidatePortal() {
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [isSubmittingSlot, setIsSubmittingSlot] = useState(false);
+
+  // Custom Round Type State
+  const [isCustomRound, setIsCustomRound] = useState(false);
+  const [customRoundText, setCustomRoundText] = useState('');
+
+  // Edit Profile Modal State
+  const [isEditProfileOpen, setIsEditProfileOpen] = useState(false);
+  const [editProfileForm, setEditProfileForm] = useState({
+    full_name: '',
+    tech_stack: '',
+    current_ctc_lpa: '',
+    target_ctc_lpa: '',
+  });
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
 
   // Booking Form State
   const [slotForm, setSlotForm] = useState({
@@ -283,6 +299,8 @@ export default function CandidatePortal() {
       else if (lower.includes('final') || lower.includes('manager')) detectedRound = 'Hiring Manager L3';
       else if (lower.includes('hr')) detectedRound = 'HR Discussion';
 
+      setIsCustomRound(false);
+      setCustomRoundText('');
       setSlotForm((prev) => ({
         ...prev,
         company_name: detectedCompany,
@@ -304,6 +322,12 @@ export default function CandidatePortal() {
     e.preventDefault();
     if (!slotForm.company_name.trim()) return;
 
+    const effectiveRoundType = isCustomRound ? customRoundText.trim() : slotForm.round_type;
+    if (isCustomRound && !customRoundText.trim()) {
+      showToast('Please enter your custom round type.');
+      return;
+    }
+
     // Strict Unified Slot Collision Prevention
     const collision = checkSlotCollision(
       slotForm.scheduled_time,
@@ -323,7 +347,7 @@ export default function CandidatePortal() {
       client_id: currentClient?.id || 'cli-1',
       candidate_name: currentClient?.full_name ? `${currentClient.full_name.split(' ')[0]} ${currentClient.full_name.split(' ')[1]?.[0] || ''}.` : 'You',
       company_name: slotForm.company_name.trim(),
-      round_type: slotForm.round_type,
+      round_type: effectiveRoundType,
       scheduled_date: slotForm.scheduled_date,
       scheduled_time: slotForm.scheduled_time,
       priority: 'urgent',
@@ -411,6 +435,57 @@ export default function CandidatePortal() {
   const handleLogout = () => {
     setCurrentClient(null);
     localStorage.removeItem('cf_current_client');
+  };
+
+  const handleOpenEditProfile = () => {
+    if (!currentClient) return;
+    setEditProfileForm({
+      full_name: currentClient.full_name || '',
+      tech_stack: currentClient.tech_stack || '',
+      current_ctc_lpa: String(currentClient.current_ctc_lpa || '14.0'),
+      target_ctc_lpa: currentClient.target_ctc_lpa || '24.0',
+    });
+    setIsEditProfileOpen(true);
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentClient?.id || !editProfileForm.full_name.trim()) return;
+
+    setIsSavingProfile(true);
+    const updatedClient: DatabaseClient = {
+      ...currentClient,
+      full_name: editProfileForm.full_name.trim(),
+      tech_stack: editProfileForm.tech_stack.trim() || currentClient.tech_stack,
+      current_ctc_lpa: editProfileForm.current_ctc_lpa.trim() || currentClient.current_ctc_lpa,
+      target_ctc_lpa: editProfileForm.target_ctc_lpa.trim() || undefined,
+    };
+
+    try {
+      await supabase
+        .from('clients')
+        .update({
+          full_name: updatedClient.full_name,
+          tech_stack: updatedClient.tech_stack,
+          current_ctc_lpa: updatedClient.current_ctc_lpa,
+          target_ctc_lpa: updatedClient.target_ctc_lpa || null,
+        })
+        .eq('id', currentClient.id);
+
+      setCurrentClient(updatedClient);
+      localStorage.setItem('cf_current_client', JSON.stringify(updatedClient));
+      broadcastSync('CLIENT_UPDATED', { clientId: currentClient.id });
+      showToast('Profile updated successfully!');
+      setIsEditProfileOpen(false);
+    } catch {
+      setCurrentClient(updatedClient);
+      localStorage.setItem('cf_current_client', JSON.stringify(updatedClient));
+      broadcastSync('CLIENT_UPDATED', { clientId: currentClient.id });
+      showToast('Profile updated locally.');
+      setIsEditProfileOpen(false);
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   const mySlots = allSlots.filter((s) => s.client_id === currentClient?.id);
@@ -540,17 +615,34 @@ export default function CandidatePortal() {
           </div>
         </header>
 
-        {/* Candidate Detail Strip */}
-        <div className="bg-[#111113] border border-zinc-800 rounded-2xl p-3.5 flex items-center justify-between text-xs">
-          <div>
-            <strong className="text-white font-extrabold block text-sm">{currentClient.tech_stack}</strong>
-            <span className="text-zinc-400 text-[11px] font-mono mt-0.5 block">
-              Current CTC: <strong className="text-white font-bold">{currentClient.current_ctc_lpa || '18.0'} LPA</strong>
-            </span>
+        {/* Candidate Detail Strip with Edit Button */}
+        <div className="bg-[#111113] border border-zinc-800 rounded-2xl p-3.5 space-y-2 text-xs">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <strong className="text-white font-extrabold block text-sm">{currentClient.tech_stack}</strong>
+              <div className="flex items-center gap-2 mt-0.5 text-zinc-400 text-[11px] font-mono">
+                <span>Current CTC: <strong className="text-white font-bold">{currentClient.current_ctc_lpa || '18.0'} LPA</strong></span>
+                {currentClient.target_ctc_lpa && (
+                  <>
+                    <span>•</span>
+                    <span>Target: <strong className="text-emerald-400 font-bold">{currentClient.target_ctc_lpa} LPA</strong></span>
+                  </>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenEditProfile}
+              className="px-2.5 py-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white rounded-lg border border-zinc-800 text-[11px] font-bold flex items-center gap-1 transition-colors shrink-0 cursor-pointer"
+            >
+              <Edit3 className="w-3 h-3 text-zinc-400" />
+              <span>Edit Profile</span>
+            </button>
           </div>
-          <span className="text-xs font-mono text-zinc-400 font-bold">
-            {currentClient.whatsapp_number}
-          </span>
+          <div className="flex items-center justify-between pt-1.5 border-t border-zinc-800/80 text-[11px] text-zinc-400 font-mono">
+            <span>WhatsApp: {currentClient.whatsapp_number}</span>
+            <span className="text-emerald-400 font-bold">Verified Candidate</span>
+          </div>
         </div>
 
         {/* ======================================================== */}
@@ -904,8 +996,15 @@ export default function CandidatePortal() {
                   Interview Round *
                 </label>
                 <select
-                  value={slotForm.round_type}
-                  onChange={(e) => setSlotForm({ ...slotForm, round_type: e.target.value })}
+                  value={isCustomRound ? 'Custom' : slotForm.round_type}
+                  onChange={(e) => {
+                    if (e.target.value === 'Custom') {
+                      setIsCustomRound(true);
+                    } else {
+                      setIsCustomRound(false);
+                      setSlotForm({ ...slotForm, round_type: e.target.value });
+                    }
+                  }}
                   className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
                 >
                   <option value="Technical Coding L1">Technical Coding L1</option>
@@ -913,8 +1012,25 @@ export default function CandidatePortal() {
                   <option value="Screening Round">Screening Round</option>
                   <option value="Hiring Manager L3">Hiring Manager L3</option>
                   <option value="HR Discussion">HR Discussion</option>
+                  <option value="Custom">Custom (Enter manually)...</option>
                 </select>
               </div>
+
+              {isCustomRound && (
+                <div>
+                  <label className="block text-[11px] font-bold text-emerald-400 mb-1">
+                    Custom Round Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={customRoundText}
+                    onChange={(e) => setCustomRoundText(e.target.value)}
+                    placeholder="e.g. Take-home review, Director Round, Live architecture"
+                    className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+              )}
 
               {/* Date & Time Selector */}
               <div>
@@ -1168,6 +1284,115 @@ export default function CandidatePortal() {
               <span>{conflictWarning ? 'Slot Unavailable' : 'Apply Date & Time'}</span>
               <Check className="w-4 h-4" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL: EDIT CANDIDATE PROFILE                            */}
+      {/* ======================================================== */}
+      {isEditProfileOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#121214] rounded-3xl max-w-sm w-full p-6 border border-zinc-800 shadow-2xl space-y-4 text-white">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-white">
+                  <User className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-white">Edit Profile Details</h3>
+                  <p className="text-[11px] text-zinc-400">Update your name & target tech stack</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditProfileOpen(false)}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveProfile} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Full Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editProfileForm.full_name}
+                  onChange={(e) =>
+                    setEditProfileForm({ ...editProfileForm, full_name: e.target.value })
+                  }
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Primary Tech Stack / Role *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editProfileForm.tech_stack}
+                  onChange={(e) =>
+                    setEditProfileForm({ ...editProfileForm, tech_stack: e.target.value })
+                  }
+                  placeholder="e.g. Java Full Stack / Spring Boot / React"
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Current CTC (LPA)
+                  </label>
+                  <input
+                    type="text"
+                    value={editProfileForm.current_ctc_lpa}
+                    onChange={(e) =>
+                      setEditProfileForm({ ...editProfileForm, current_ctc_lpa: e.target.value })
+                    }
+                    placeholder="e.g. 14.5"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Target CTC (LPA)
+                  </label>
+                  <input
+                    type="text"
+                    value={editProfileForm.target_ctc_lpa}
+                    onChange={(e) =>
+                      setEditProfileForm({ ...editProfileForm, target_ctc_lpa: e.target.value })
+                    }
+                    placeholder="e.g. 24.0"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-400 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEditProfileOpen(false)}
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingProfile}
+                  className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors"
+                >
+                  {isSavingProfile ? 'Saving...' : 'Save Profile'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
