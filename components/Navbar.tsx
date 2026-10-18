@@ -9,7 +9,7 @@ export default function Navbar() {
   const pathname = usePathname();
 
   // On Admin Command Center and Candidate Portal, do not render the public marketing navbar.
-  if (pathname && (pathname.startsWith('/admin') || pathname.startsWith('/portal'))) {
+  if (pathname && (pathname.startsWith('/admin') || pathname.startsWith('/portal') || pathname.startsWith('/instant'))) {
     return null;
   }
 

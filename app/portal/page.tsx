@@ -25,6 +25,11 @@ import {
   DatabaseInterviewSlot
 } from '@/lib/supabase';
 import { broadcastSync, subscribeToSync } from '@/lib/portalSync';
+import {
+  checkSlotCollision,
+  getTimeSlotsAvailability,
+  STANDARD_TIME_SLOTS
+} from '@/lib/slotCollision';
 
 // Fallback Mock Clients & Cohort Slots for offline resilience
 const FALLBACK_CLIENTS: DatabaseClient[] = [
@@ -239,26 +244,13 @@ export default function CandidatePortal() {
 
   // Conflict detection for Calendar Day-Planner
   useEffect(() => {
-    const slotsOnDate = allSlots.filter(
-      (s) => s.scheduled_date === calendarDate && s.status !== 'declined'
-    );
-    const targetMins = timeToMinutes(calendarTime);
-
-    const conflict = slotsOnDate.find((slot) => {
-      const slotMins = timeToMinutes(slot.scheduled_time);
-      return Math.abs(slotMins - targetMins) < 45;
-    });
-
-    if (conflict) {
-      setConflictWarning(
-        `Another interview is scheduled at ${conflict.scheduled_time} (${conflict.company_name} - ${conflict.round_type}).`
-      );
-      const options = ['10:30 AM IST', '11:45 AM IST', '01:30 PM IST', '03:30 PM IST', '05:00 PM IST'];
-      const free = options.filter((opt) => {
-        const optMins = timeToMinutes(opt);
-        return !slotsOnDate.some((s) => Math.abs(timeToMinutes(s.scheduled_time) - optMins) < 45);
-      });
-      setSuggestedSlots(free.slice(0, 2));
+    const collision = checkSlotCollision(calendarTime, calendarDate, allSlots);
+    if (collision.isClash) {
+      setConflictWarning(collision.message || 'Time slot clash detected.');
+      const available = getTimeSlotsAvailability(calendarDate, allSlots)
+        .filter((s) => !s.isBooked)
+        .map((s) => s.time);
+      setSuggestedSlots(available.slice(0, 2));
     } else {
       setConflictWarning(null);
       setSuggestedSlots([]);
@@ -311,6 +303,19 @@ export default function CandidatePortal() {
   const handleSubmitSlotRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!slotForm.company_name.trim()) return;
+
+    // Strict Unified Slot Collision Prevention
+    const collision = checkSlotCollision(
+      slotForm.scheduled_time,
+      slotForm.scheduled_date,
+      allSlots
+    );
+    if (collision.isClash) {
+      showToast(
+        collision.message || 'This time slot is already booked. Please choose an open slot.'
+      );
+      return;
+    }
 
     setIsSubmittingSlot(true);
 
@@ -1066,26 +1071,45 @@ export default function CandidatePortal() {
               )}
             </div>
 
-            {/* Time Slot Picker */}
+            {/* Time Slot Picker with Booked Slots Auto-Disabled */}
             <div>
-              <label className="block text-xs font-bold text-zinc-300 mb-1.5">
-                Target Interview Time (IST)
-              </label>
-              <div className="grid grid-cols-2 gap-2 mb-2">
-                {['10:30 AM IST', '02:30 PM IST', '04:00 PM IST', '05:30 PM IST'].map((timeOption) => (
-                  <button
-                    key={timeOption}
-                    type="button"
-                    onClick={() => setCalendarTime(timeOption)}
-                    className={`py-2 px-3 text-xs font-mono font-extrabold rounded-xl border text-center transition-colors ${
-                      calendarTime === timeOption
-                        ? 'bg-white text-black border-white'
-                        : 'bg-black border-zinc-800 text-zinc-300 hover:bg-zinc-900'
-                    }`}
-                  >
-                    {timeOption}
-                  </button>
-                ))}
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-bold text-zinc-300">
+                  Target Interview Time (IST) *
+                </label>
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  Booked slots auto-disabled
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-2">
+                {getTimeSlotsAvailability(calendarDate, allSlots).map(
+                  ({ time, isBooked, conflictInfo }) => {
+                    const isSelected = calendarTime === time;
+                    return (
+                      <button
+                        key={time}
+                        type="button"
+                        disabled={isBooked}
+                        onClick={() => setCalendarTime(time)}
+                        title={isBooked ? `Clashes with ${conflictInfo}` : 'Slot available'}
+                        className={`py-2 px-2 text-xs font-mono font-bold rounded-xl border text-center transition-all ${
+                          isBooked
+                            ? 'opacity-35 line-through bg-zinc-950 border-zinc-900 text-zinc-600 cursor-not-allowed'
+                            : isSelected
+                            ? 'bg-white text-black border-white shadow-md font-extrabold'
+                            : 'bg-black border-zinc-800 text-zinc-300 hover:bg-zinc-900 hover:text-white'
+                        }`}
+                      >
+                        <div>{time}</div>
+                        {isBooked && (
+                          <span className="text-[9px] text-red-400/80 block no-underline font-normal">
+                            Booked
+                          </span>
+                        )}
+                      </button>
+                    );
+                  }
+                )}
               </div>
 
               <input
@@ -1129,7 +1153,9 @@ export default function CandidatePortal() {
 
             <button
               type="button"
+              disabled={Boolean(conflictWarning)}
               onClick={() => {
+                if (conflictWarning) return;
                 setSlotForm((prev) => ({
                   ...prev,
                   scheduled_date: calendarDate,
@@ -1137,9 +1163,9 @@ export default function CandidatePortal() {
                 }));
                 setIsCalendarOpen(false);
               }}
-              className="w-full bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
+              className="w-full bg-white hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed text-black font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
             >
-              <span>Apply Date & Time</span>
+              <span>{conflictWarning ? 'Slot Unavailable' : 'Apply Date & Time'}</span>
               <Check className="w-4 h-4" />
             </button>
           </div>

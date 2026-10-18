@@ -9,7 +9,7 @@ export default function Footer() {
   const pathname = usePathname();
 
   // On Admin Command Center and Candidate Portal, do not render the marketing footer.
-  if (pathname && (pathname.startsWith('/admin') || pathname.startsWith('/portal'))) {
+  if (pathname && (pathname.startsWith('/admin') || pathname.startsWith('/portal') || pathname.startsWith('/instant'))) {
     return null;
   }
 

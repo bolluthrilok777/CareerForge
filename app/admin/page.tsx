@@ -20,7 +20,9 @@ import {
   Users,
   Award,
   ShieldCheck,
-  ArrowRight
+  ArrowRight,
+  Zap,
+  Plus
 } from 'lucide-react';
 import {
   supabase,
@@ -29,6 +31,25 @@ import {
   DatabaseInterviewSlot
 } from '@/lib/supabase';
 import { broadcastSync, subscribeToSync } from '@/lib/portalSync';
+import {
+  checkSlotCollision,
+  getTimeSlotsAvailability,
+  STANDARD_TIME_SLOTS
+} from '@/lib/slotCollision';
+
+function getUpcomingAdminDates(): { dateStr: string; label: string; dayName: string }[] {
+  const dates = [];
+  const base = new Date('2026-10-19T12:00:00Z');
+  for (let i = 0; i < 10; i++) {
+    const d = new Date(base);
+    d.setDate(base.getDate() + i);
+    const dateStr = d.toISOString().split('T')[0];
+    const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+    const label = d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
+    dates.push({ dateStr, label, dayName });
+  }
+  return dates;
+}
 
 // Initial Mock Fallbacks
 const INITIAL_MOCK_LEADS: DatabaseLead[] = [
@@ -159,6 +180,20 @@ export default function MobileAdminCommandCenter() {
   const [editingResumeClient, setEditingResumeClient] = useState<DatabaseClient | null>(null);
   const [resumeUrlInput, setResumeUrlInput] = useState('');
   const [isProcessingFile, setIsProcessingFile] = useState(false);
+
+  // Emergency / Per-Round Booking Modal State
+  const [isEmergencyModalOpen, setIsEmergencyModalOpen] = useState(false);
+  const [emergencyForm, setEmergencyForm] = useState({
+    candidate_name: '',
+    whatsapp_number: '',
+    company_name: '',
+    round_type: 'Technical Coding L1',
+    round_fee: '₹3,000',
+    scheduled_date: '2026-10-21',
+    scheduled_time: '02:30 PM IST',
+  });
+  const [isSubmittingEmergency, setIsSubmittingEmergency] = useState(false);
+  const [emergencyError, setEmergencyError] = useState<string | null>(null);
 
   // Restore auth
   useEffect(() => {
@@ -628,6 +663,159 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
+  // Emergency / Per-Round Booking Submission
+  const handleEmergencySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEmergencyError(null);
+
+    const cleanPhone = emergencyForm.whatsapp_number.replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      setEmergencyError('Please enter a valid 10-digit WhatsApp number.');
+      return;
+    }
+    if (!emergencyForm.candidate_name.trim() || !emergencyForm.company_name.trim()) {
+      setEmergencyError('Candidate name and company name are required.');
+      return;
+    }
+
+    // Check collision prevention
+    const collision = checkSlotCollision(
+      emergencyForm.scheduled_time,
+      emergencyForm.scheduled_date,
+      slots
+    );
+    if (collision.isClash) {
+      setEmergencyError(collision.message || 'Time slot already booked. Please choose an open slot.');
+      return;
+    }
+
+    setIsSubmittingEmergency(true);
+
+    try {
+      let clientId = `cli-${Date.now()}`;
+      let createdClient: DatabaseClient;
+
+      const existingClient = clients.find(
+        (c) => c.whatsapp_number.replace(/\D/g, '') === cleanPhone
+      );
+
+      if (existingClient) {
+        clientId = existingClient.id;
+        createdClient = { ...existingClient, client_type: 'per_round' };
+        await supabase
+          .from('clients')
+          .update({ client_type: 'per_round' })
+          .eq('id', clientId);
+      } else {
+        const clientPayload = {
+          full_name: emergencyForm.candidate_name.trim(),
+          whatsapp_number: cleanPhone,
+          tech_stack: `${emergencyForm.round_type} (Emergency Support)`,
+          current_ctc_lpa: '14.0',
+          fee_status: 'offer_locked' as const,
+          naukri_status: 'in_progress',
+          linkedin_status: 'in_progress',
+          client_type: 'per_round',
+          notes: `Agreed Round Fee: ${emergencyForm.round_fee} for ${emergencyForm.company_name.trim()}`,
+        };
+
+        const { data: insertedClient, error: clientErr } = await supabase
+          .from('clients')
+          .insert([clientPayload])
+          .select();
+
+        if (clientErr) throw clientErr;
+
+        createdClient = (insertedClient && insertedClient[0]) || {
+          ...clientPayload,
+          id: clientId,
+          created_at: new Date().toISOString(),
+        };
+      }
+
+      const slotPayload: Omit<DatabaseInterviewSlot, 'id' | 'created_at'> = {
+        client_id: clientId,
+        candidate_name: emergencyForm.candidate_name.trim(),
+        company_name: emergencyForm.company_name.trim(),
+        round_type: emergencyForm.round_type,
+        scheduled_date: emergencyForm.scheduled_date,
+        scheduled_time: emergencyForm.scheduled_time,
+        priority: 'urgent',
+        status: 'approved',
+        round_fee: emergencyForm.round_fee,
+        invite_verified: true,
+      };
+
+      const { data: insertedSlot, error: slotErr } = await supabase
+        .from('interview_slots')
+        .insert([slotPayload])
+        .select();
+
+      if (slotErr) throw slotErr;
+
+      const createdSlot = (insertedSlot && insertedSlot[0]) || {
+        ...slotPayload,
+        id: `slot-${Date.now()}`,
+        created_at: new Date().toISOString(),
+      };
+
+      setClients((prev) => [createdClient, ...prev.filter((c) => c.id !== createdClient.id)]);
+      setSlots((prev) => [createdSlot, ...prev]);
+
+      broadcastSync('SLOT_CREATED', createdSlot);
+      showToast(`⚡ Emergency slot approved for ${emergencyForm.candidate_name}!`);
+      setIsEmergencyModalOpen(false);
+
+      setEmergencyForm({
+        candidate_name: '',
+        whatsapp_number: '',
+        company_name: '',
+        round_type: 'Technical Coding L1',
+        round_fee: '₹3,000',
+        scheduled_date: '2026-10-21',
+        scheduled_time: '02:30 PM IST',
+      });
+    } catch {
+      // Offline fallback
+      const fallbackClient: DatabaseClient = {
+        id: `cli-${Date.now()}`,
+        full_name: emergencyForm.candidate_name.trim(),
+        whatsapp_number: cleanPhone,
+        tech_stack: `${emergencyForm.round_type} (Emergency Support)`,
+        current_ctc_lpa: '14.0',
+        fee_status: 'offer_locked',
+        naukri_status: 'in_progress',
+        linkedin_status: 'in_progress',
+        client_type: 'per_round',
+        notes: `Agreed Round Fee: ${emergencyForm.round_fee}`,
+        created_at: new Date().toISOString(),
+      };
+
+      const fallbackSlot: DatabaseInterviewSlot = {
+        id: `slot-${Date.now()}`,
+        client_id: fallbackClient.id,
+        candidate_name: emergencyForm.candidate_name.trim(),
+        company_name: emergencyForm.company_name.trim(),
+        round_type: emergencyForm.round_type,
+        scheduled_date: emergencyForm.scheduled_date,
+        scheduled_time: emergencyForm.scheduled_time,
+        priority: 'urgent',
+        status: 'approved',
+        round_fee: emergencyForm.round_fee,
+        invite_verified: true,
+        created_at: new Date().toISOString(),
+      };
+
+      setClients((prev) => [fallbackClient, ...prev]);
+      setSlots((prev) => [fallbackSlot, ...prev]);
+      broadcastSync('SLOT_CREATED', fallbackSlot);
+      showToast(`⚡ Emergency slot approved (local sync)`);
+      setIsEmergencyModalOpen(false);
+    } finally {
+      setIsSubmittingEmergency(false);
+    }
+  };
+
   // Header Analytics (Zero Currency Amounts)
   const currentMonthYear = '2026-10';
   const clientsThisMonth = clients.filter((c) => (c.created_at || '').startsWith(currentMonthYear)).length;
@@ -759,6 +947,19 @@ export default function MobileAdminCommandCenter() {
             <LogOut className="w-4 h-4" />
           </button>
         </header>
+
+        {/* PROMINENT EMERGENCY / PER-ROUND BOOKING BUTTON */}
+        <button
+          type="button"
+          onClick={() => {
+            setEmergencyError(null);
+            setIsEmergencyModalOpen(true);
+          }}
+          className="w-full bg-emerald-500 hover:bg-emerald-400 active:scale-[0.98] text-black font-extrabold text-xs py-3 px-4 rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all border border-emerald-400/50 cursor-pointer"
+        >
+          <Zap className="w-4 h-4 fill-black" />
+          <span>+ Emergency / Per-Round Booking</span>
+        </button>
 
         {/* ======================================================== */}
         {/* MAIN HEADER ANALYTICS (ZERO CURRENCY AMOUNTS SHOWN)      */}
@@ -931,11 +1132,17 @@ export default function MobileAdminCommandCenter() {
                           {dateSlots.map((slot) => {
                             const client = clients.find((c) => c.id === slot.client_id);
                             const candName = slot.candidate_name || client?.full_name || 'Candidate';
+                            const isEmergency = client?.client_type === 'per_round' || Boolean(slot.round_fee);
+                            const feeDisplay = slot.round_fee
+                              ? (typeof slot.round_fee === 'string' && slot.round_fee.startsWith('₹')
+                                  ? slot.round_fee
+                                  : `₹${slot.round_fee}`)
+                              : '₹3,000';
 
                             return (
                               <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0">
                                 <div className="flex items-start justify-between gap-2">
-                                  <div>
+                                  <div className="space-y-1">
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                       <strong className="text-xs font-extrabold text-white">
                                         {slot.company_name}
@@ -949,11 +1156,26 @@ export default function MobileAdminCommandCenter() {
                                         </span>
                                       )}
                                     </div>
-                                    <div className="text-[11px] text-zinc-400 mt-0.5">
+                                    <div className="text-[11px] text-zinc-400">
                                       {slot.round_type}
                                     </div>
-                                    <div className="text-[11px] font-mono text-zinc-400 mt-0.5">
+                                    <div className="text-[11px] font-mono text-zinc-400">
                                       {slot.scheduled_time}
+                                    </div>
+
+                                    {/* Visual Client Type Distinction Badges */}
+                                    <div className="pt-0.5">
+                                      {isEmergency ? (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/30">
+                                          <Zap className="w-2.5 h-2.5 fill-emerald-400" />
+                                          Emergency Per-Round - Fee: {feeDisplay}
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-md border border-blue-500/30">
+                                          <ShieldCheck className="w-2.5 h-2.5" />
+                                          Full Retainer Client
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
 
@@ -1019,9 +1241,20 @@ export default function MobileAdminCommandCenter() {
                       <div key={c.id} className="py-3.5 first:pt-0 last:pb-0 space-y-2">
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <strong className="text-xs font-extrabold text-white block">
-                              {c.full_name}
-                            </strong>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <strong className="text-xs font-extrabold text-white">
+                                {c.full_name}
+                              </strong>
+                              {c.client_type === 'per_round' ? (
+                                <span className="text-[10px] font-extrabold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30">
+                                  Emergency Per-Round
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-extrabold text-blue-400 bg-blue-500/10 px-1.5 py-0.2 rounded border border-blue-500/30">
+                                  Retainer
+                                </span>
+                              )}
+                            </div>
                             <span className="text-[11px] text-zinc-400 block">{c.tech_stack}</span>
                             <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-300">
                               <span>
@@ -1384,6 +1617,266 @@ export default function MobileAdminCommandCenter() {
                   className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors"
                 >
                   Save & Sync
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL: EMERGENCY / PER-ROUND BOOKING MODAL               */}
+      {/* ======================================================== */}
+      {isEmergencyModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#111113] rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 border border-zinc-800 shadow-2xl space-y-4 text-white max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                  <Zap className="w-4 h-4 fill-emerald-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-white">
+                    Emergency / Per-Round Booking
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Single urgent interview round • Clash-protected
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEmergencyModalOpen(false)}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {emergencyError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+                <span>{emergencyError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleEmergencySubmit} className="space-y-3.5">
+              {/* Candidate Name & WhatsApp */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Candidate Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={emergencyForm.candidate_name}
+                    onChange={(e) =>
+                      setEmergencyForm({ ...emergencyForm, candidate_name: e.target.value })
+                    }
+                    placeholder="e.g. Ramesh Varma"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    WhatsApp Number *
+                  </label>
+                  <input
+                    type="tel"
+                    required
+                    value={emergencyForm.whatsapp_number}
+                    onChange={(e) =>
+                      setEmergencyForm({ ...emergencyForm, whatsapp_number: e.target.value })
+                    }
+                    placeholder="e.g. 9876543210"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Company & Round Type */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Company Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={emergencyForm.company_name}
+                    onChange={(e) =>
+                      setEmergencyForm({ ...emergencyForm, company_name: e.target.value })
+                    }
+                    placeholder="e.g. Oracle, Swiggy"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Round Type *
+                  </label>
+                  <select
+                    value={emergencyForm.round_type}
+                    onChange={(e) =>
+                      setEmergencyForm({ ...emergencyForm, round_type: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                  >
+                    <option value="Technical Coding L1">Technical Coding L1</option>
+                    <option value="System Design L2">System Design L2</option>
+                    <option value="Screening Round">Screening Round</option>
+                    <option value="Hiring Manager L3">Hiring Manager L3</option>
+                    <option value="HR Discussion">HR Discussion</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Agreed Round Fee */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Agreed Round Fee *
+                </label>
+                <div className="flex gap-2 mb-2">
+                  {['₹3,000', '₹4,000', '₹5,000', '₹6,000'].map((fee) => (
+                    <button
+                      key={fee}
+                      type="button"
+                      onClick={() => setEmergencyForm({ ...emergencyForm, round_fee: fee })}
+                      className={`flex-1 py-1.5 px-2 text-xs font-mono font-bold rounded-xl border text-center transition-colors ${
+                        emergencyForm.round_fee === fee
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
+                          : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      {fee}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  value={emergencyForm.round_fee}
+                  onChange={(e) =>
+                    setEmergencyForm({ ...emergencyForm, round_fee: e.target.value })
+                  }
+                  placeholder="Custom fee, e.g. ₹4,500"
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Date Selection */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1.5">
+                  Interview Date *
+                </label>
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+                  {getUpcomingAdminDates().map(({ dateStr, label, dayName }) => {
+                    const isSelected = dateStr === emergencyForm.scheduled_date;
+                    const dayBookingsCount = slots.filter(
+                      (s) =>
+                        s.scheduled_date === dateStr &&
+                        s.status !== 'declined' &&
+                        s.status !== 'cancelled'
+                    ).length;
+
+                    return (
+                      <button
+                        key={dateStr}
+                        type="button"
+                        onClick={() =>
+                          setEmergencyForm({ ...emergencyForm, scheduled_date: dateStr })
+                        }
+                        className={`flex flex-col items-center py-2 px-3 rounded-xl border text-center shrink-0 transition-all ${
+                          isSelected
+                            ? 'bg-white text-black border-white shadow-md'
+                            : 'bg-black border-zinc-800 text-zinc-400 hover:bg-zinc-900'
+                        }`}
+                      >
+                        <span className="text-[10px] font-mono uppercase">{dayName}</span>
+                        <strong className="text-xs font-extrabold mt-0.5">{label}</strong>
+                        {dayBookingsCount > 0 && (
+                          <span
+                            className={`text-[9px] mt-1 px-1 rounded font-mono ${
+                              isSelected ? 'bg-zinc-800 text-white' : 'bg-zinc-800 text-zinc-400'
+                            }`}
+                          >
+                            {dayBookingsCount} booked
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Clash-Free Available Time Slot Grid */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-bold text-zinc-300">
+                    Available Time Slot (IST) *
+                  </label>
+                  <span className="text-[10px] text-zinc-500 font-mono">
+                    Booked slots auto-disabled
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {getTimeSlotsAvailability(emergencyForm.scheduled_date, slots).map(
+                    ({ time, isBooked, conflictInfo }) => {
+                      const isSelected = emergencyForm.scheduled_time === time;
+                      return (
+                        <button
+                          key={time}
+                          type="button"
+                          disabled={isBooked}
+                          onClick={() =>
+                            setEmergencyForm({ ...emergencyForm, scheduled_time: time })
+                          }
+                          title={isBooked ? `Clashes with ${conflictInfo}` : 'Slot available'}
+                          className={`py-2 px-2.5 text-xs font-mono font-bold rounded-xl border text-center transition-all ${
+                            isBooked
+                              ? 'opacity-35 line-through bg-zinc-950 border-zinc-900 text-zinc-600 cursor-not-allowed'
+                              : isSelected
+                              ? 'bg-emerald-500 text-black border-emerald-400 shadow-md font-extrabold'
+                              : 'bg-black border-zinc-800 text-zinc-300 hover:bg-zinc-900 hover:text-white'
+                          }`}
+                        >
+                          <div>{time}</div>
+                          {isBooked && (
+                            <span className="text-[9px] text-red-400/80 block no-underline font-normal">
+                              Booked
+                            </span>
+                          )}
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEmergencyModalOpen(false)}
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-3 rounded-xl transition-colors border border-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingEmergency}
+                  className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold text-xs py-3 rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-950/40 disabled:opacity-50"
+                >
+                  {isSubmittingEmergency ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4 stroke-[3]" />
+                      <span>Approve & Book Slot</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>

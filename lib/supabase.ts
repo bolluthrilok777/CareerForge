@@ -48,6 +48,7 @@ export interface DatabaseClient {
   profiles_status?: string;
   resume_url?: string | null;
   notes?: string | null;
+  client_type?: 'per_round' | 'full_package' | string | null;
 }
 
 export interface DatabaseInterviewSlot {
@@ -60,12 +61,13 @@ export interface DatabaseInterviewSlot {
   scheduled_time: string;
   jd_text?: string | null;
   meeting_link?: string | null;
-  status: 'requested' | 'approved' | 'declined' | 'rescheduled';
+  status: 'requested' | 'approved' | 'declined' | 'rescheduled' | 'cancelled';
   priority?: 'urgent' | 'high' | 'standard';
   invite_verified?: boolean;
   verification_status?: string;
   candidate_name?: string;
   tech_stack?: string;
+  round_fee?: string | number | null;
   // Joined or augmented client details for UI display
   client?: DatabaseClient;
 }
