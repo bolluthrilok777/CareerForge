@@ -159,7 +159,6 @@ export default function CandidatePortal() {
     full_name: '',
     tech_stack: '',
     current_ctc_lpa: '',
-    target_ctc_lpa: '',
   });
   const [isSavingProfile, setIsSavingProfile] = useState(false);
 
@@ -443,7 +442,6 @@ export default function CandidatePortal() {
       full_name: currentClient.full_name || '',
       tech_stack: currentClient.tech_stack || '',
       current_ctc_lpa: String(currentClient.current_ctc_lpa || '14.0'),
-      target_ctc_lpa: currentClient.target_ctc_lpa || '24.0',
     });
     setIsEditProfileOpen(true);
   };
@@ -458,7 +456,6 @@ export default function CandidatePortal() {
       full_name: editProfileForm.full_name.trim(),
       tech_stack: editProfileForm.tech_stack.trim() || currentClient.tech_stack,
       current_ctc_lpa: editProfileForm.current_ctc_lpa.trim() || currentClient.current_ctc_lpa,
-      target_ctc_lpa: editProfileForm.target_ctc_lpa.trim() || undefined,
     };
 
     try {
@@ -468,7 +465,6 @@ export default function CandidatePortal() {
           full_name: updatedClient.full_name,
           tech_stack: updatedClient.tech_stack,
           current_ctc_lpa: updatedClient.current_ctc_lpa,
-          target_ctc_lpa: updatedClient.target_ctc_lpa || null,
         })
         .eq('id', currentClient.id);
 
@@ -620,14 +616,8 @@ export default function CandidatePortal() {
           <div className="flex items-start justify-between gap-2">
             <div>
               <strong className="text-white font-extrabold block text-sm">{currentClient.tech_stack}</strong>
-              <div className="flex items-center gap-2 mt-0.5 text-zinc-400 text-[11px] font-mono">
+              <div className="mt-0.5 text-zinc-400 text-[11px] font-mono">
                 <span>Current CTC: <strong className="text-white font-bold">{currentClient.current_ctc_lpa || '18.0'} LPA</strong></span>
-                {currentClient.target_ctc_lpa && (
-                  <>
-                    <span>•</span>
-                    <span>Target: <strong className="text-emerald-400 font-bold">{currentClient.target_ctc_lpa} LPA</strong></span>
-                  </>
-                )}
               </div>
             </div>
             <button
@@ -1345,35 +1335,19 @@ export default function CandidatePortal() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Current CTC (LPA)
-                  </label>
-                  <input
-                    type="text"
-                    value={editProfileForm.current_ctc_lpa}
-                    onChange={(e) =>
-                      setEditProfileForm({ ...editProfileForm, current_ctc_lpa: e.target.value })
-                    }
-                    placeholder="e.g. 14.5"
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Target CTC (LPA)
-                  </label>
-                  <input
-                    type="text"
-                    value={editProfileForm.target_ctc_lpa}
-                    onChange={(e) =>
-                      setEditProfileForm({ ...editProfileForm, target_ctc_lpa: e.target.value })
-                    }
-                    placeholder="e.g. 24.0"
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-400 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Current CTC (LPA)
+                </label>
+                <input
+                  type="text"
+                  value={editProfileForm.current_ctc_lpa}
+                  onChange={(e) =>
+                    setEditProfileForm({ ...editProfileForm, current_ctc_lpa: e.target.value })
+                  }
+                  placeholder="e.g. 14.5"
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
               </div>
 
               <div className="flex gap-2 pt-2">
