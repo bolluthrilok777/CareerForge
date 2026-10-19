@@ -22,6 +22,7 @@ import {
   BadgeCheck
 } from 'lucide-react';
 import { supabase, DatabaseLead } from '@/lib/supabase';
+import { triggerWhatsAppAlert } from '@/lib/whatsappNotify';
 
 const TECH_STACKS = [
   'Java Full Stack (Spring Boot / Microservices / React / Angular)',
@@ -185,6 +186,16 @@ export default function SocialAdLandingPage() {
 
       setConfirmedBookingId(generatedId);
       setIsConfirmed(true);
+
+      // Trigger official Meta WhatsApp Cloud API alert (non-blocking)
+      triggerWhatsAppAlert('new_lead', {
+        full_name: payload.full_name,
+        tech_stack: payload.tech_stack,
+        target_ctc_lpa: payload.target_ctc_lpa,
+        booking_date: payload.booking_date,
+        booking_time: payload.booking_time,
+        whatsapp_number: payload.whatsapp_number,
+      });
     } catch (err: unknown) {
       const errMsg =
         err instanceof Error

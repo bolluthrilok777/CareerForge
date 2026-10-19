@@ -31,6 +31,7 @@ import {
   DatabaseInterviewSlot
 } from '@/lib/supabase';
 import { broadcastSync, subscribeToSync } from '@/lib/portalSync';
+import { triggerWhatsAppAlert } from '@/lib/whatsappNotify';
 import {
   checkSlotCollision,
   getTimeSlotsAvailability,
@@ -787,6 +788,18 @@ export default function MobileAdminCommandCenter() {
       setSlots((prev) => [createdSlot, ...prev]);
 
       broadcastSync('SLOT_CREATED', createdSlot);
+
+      // Trigger official Meta WhatsApp Cloud API alert (non-blocking)
+      triggerWhatsAppAlert('emergency_booking', {
+        name: emergencyForm.candidate_name.trim(),
+        phone: cleanPhone,
+        company_name: emergencyForm.company_name.trim(),
+        round_type: effectiveRoundType,
+        round_fee: emergencyForm.round_fee,
+        date: emergencyForm.scheduled_date,
+        time: emergencyForm.scheduled_time,
+      });
+
       showToast(`⚡ Emergency slot approved for ${emergencyForm.candidate_name}!`);
       setIsEmergencyModalOpen(false);
 

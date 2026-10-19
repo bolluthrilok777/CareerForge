@@ -27,6 +27,7 @@ import {
   DatabaseInterviewSlot
 } from '@/lib/supabase';
 import { broadcastSync, subscribeToSync } from '@/lib/portalSync';
+import { triggerWhatsAppAlert } from '@/lib/whatsappNotify';
 import {
   checkSlotCollision,
   getTimeSlotsAvailability,
@@ -370,6 +371,15 @@ export default function CandidatePortal() {
       setAllSlots((prev) => [createdSlot, ...prev]);
 
       broadcastSync('SLOT_CREATED', createdSlot);
+
+      // Trigger official Meta WhatsApp Cloud API alert (non-blocking)
+      triggerWhatsAppAlert('client_slot_request', {
+        client_name: currentClient?.full_name || 'Enrolled Client',
+        company_name: slotForm.company_name.trim(),
+        round_type: effectiveRoundType,
+        date: slotForm.scheduled_date,
+        time: slotForm.scheduled_time,
+      });
 
       showToast(`Slot requested for ${slotForm.company_name}! Mentor will get in touch.`);
       setIsRequestModalOpen(false);

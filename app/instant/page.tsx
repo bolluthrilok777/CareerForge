@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { supabase, DatabaseInterviewSlot, DatabaseClient } from '@/lib/supabase';
 import { broadcastSync } from '@/lib/portalSync';
+import { triggerWhatsAppAlert } from '@/lib/whatsappNotify';
 import {
   checkSlotCollision,
   getTimeSlotsAvailability,
@@ -248,6 +249,17 @@ export default function InstantEmergencyBookingPage() {
       setExistingSlots((prev) => [createdSlot, ...prev]);
       broadcastSync('SLOT_CREATED', createdSlot);
       setBookedSuccess(createdSlot);
+
+      // Trigger official Meta WhatsApp Cloud API alert (non-blocking)
+      triggerWhatsAppAlert('emergency_booking', {
+        name: fullName.trim(),
+        phone: cleanPhone,
+        company_name: companyName.trim(),
+        round_type: effectiveRoundType,
+        round_fee: 'Emergency Round',
+        date: selectedDate,
+        time: selectedTime,
+      });
     } catch {
       // Fallback local display
       const fallbackSlot: DatabaseInterviewSlot = {
