@@ -33,6 +33,7 @@ import {
   getTimeSlotsAvailability,
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
+import { parseSlotProof, serializeSlotProof } from '@/lib/inviteProof';
 
 // Production Client & Cohort State
 const FALLBACK_CLIENTS: DatabaseClient[] = [];
@@ -115,11 +116,21 @@ export default function CandidatePortal() {
   const [isSavingMySlotEdit, setIsSavingMySlotEdit] = useState(false);
   const [editMySlotError, setEditMySlotError] = useState<string | null>(null);
 
-  // In-Memory Invite Screenshot Scanner
+  // Real OCR Recruiter Invite Scanner (24-Hour retention)
   const [inviteFile, setInviteFile] = useState<File | null>(null);
   const [invitePreviewUrl, setInvitePreviewUrl] = useState<string | null>(null);
   const [isScanningInvite, setIsScanningInvite] = useState(false);
   const [inviteVerified, setInviteVerified] = useState<boolean>(false);
+  const [ocrData, setOcrData] = useState<{
+    preview_data_url?: string;
+    uploaded_at?: string;
+    expires_at?: string;
+    confidence?: number;
+    isGenuine?: boolean;
+    verificationSignals?: string[];
+    meetingLink?: string | null;
+  } | null>(null);
+  const [scanStatusText, setScanStatusText] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const showToast = (msg: string) => {
@@ -297,40 +308,84 @@ export default function CandidatePortal() {
     }
   };
 
-  // In-Memory Invite Screenshot Scanner (Zero server storage)
-  const handleDropInvite = (file: File) => {
-    if (!file || !file.type.startsWith('image/')) return;
+  // Real OCR Recruiter Invite Scanner (24-Hour retention for admin review)
+  const handleDropInvite = async (file: File) => {
+    if (!file || !file.type.startsWith('image/')) {
+      showToast('Please select an image file (PNG, JPG, or WEBP).');
+      return;
+    }
     setInviteFile(file);
-    const url = URL.createObjectURL(file);
-    setInvitePreviewUrl(url);
+    const localUrl = URL.createObjectURL(file);
+    setInvitePreviewUrl(localUrl);
     setIsScanningInvite(true);
     setInviteVerified(false);
+    setScanStatusText('Scanning invitation text, schedule & recruiter details...');
 
-    setTimeout(() => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/scan-invite', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const json = await res.json();
+
+      if (json.success && json.isGenuine) {
+        setInviteVerified(true);
+        setOcrData({
+          preview_data_url: json.screenshot_storage?.preview_data_url,
+          uploaded_at: json.screenshot_storage?.uploaded_at,
+          expires_at: json.screenshot_storage?.expires_at,
+          confidence: json.confidence,
+          isGenuine: json.isGenuine,
+          verificationSignals: json.verificationSignals,
+          meetingLink: json.meetingLink,
+        });
+
+        // Auto-populate form fields from OCR!
+        setSlotForm((prev) => ({
+          ...prev,
+          company_name: json.detectedCompany || prev.company_name,
+          round_type: json.detectedRound || prev.round_type,
+          scheduled_date: json.detectedDate || prev.scheduled_date,
+          scheduled_time: json.detectedTime || prev.scheduled_time,
+        }));
+
+        if (
+          json.detectedRound &&
+          !['Technical Coding L1', 'System Design L2', 'Screening Round', 'Hiring Manager L3', 'HR Discussion'].includes(json.detectedRound)
+        ) {
+          setIsCustomRound(true);
+          setCustomRoundText(json.detectedRound);
+        }
+
+        showToast(
+          `✓ Genuine invite detected from ${json.detectedCompany || 'recruiter'} (${json.confidence}% confidence)! Schedule autofilled.`
+        );
+      } else {
+        // Invite attached but lower confidence / manual review needed
+        setInviteVerified(false);
+        setOcrData({
+          preview_data_url: json.screenshot_storage?.preview_data_url,
+          uploaded_at: json.screenshot_storage?.uploaded_at,
+          expires_at: json.screenshot_storage?.expires_at,
+          confidence: json.confidence || 40,
+          isGenuine: false,
+          verificationSignals: json.verificationSignals || [],
+          meetingLink: json.meetingLink,
+        });
+        showToast('Invite uploaded. Admin will inspect and verify before your slot.');
+      }
+    } catch (err) {
+      console.error('Scan error:', err);
+      setInviteVerified(false);
+      showToast('Could not complete automated scan. You can still submit for manual review.');
+    } finally {
       setIsScanningInvite(false);
-      setInviteVerified(true);
-
-      const lower = file.name.toLowerCase();
-      let detectedCompany = 'PhonePe';
-      if (lower.includes('swiggy')) detectedCompany = 'Swiggy';
-      else if (lower.includes('wells') || lower.includes('wfg')) detectedCompany = 'Wells Fargo';
-      else if (lower.includes('epam')) detectedCompany = 'EPAM Systems';
-      else if (lower.includes('google')) detectedCompany = 'Google';
-      else if (lower.includes('amazon')) detectedCompany = 'Amazon';
-
-      let detectedRound = 'Technical Coding L1';
-      if (lower.includes('l2') || lower.includes('design')) detectedRound = 'System Design L2';
-      else if (lower.includes('final') || lower.includes('manager')) detectedRound = 'Hiring Manager L3';
-      else if (lower.includes('hr')) detectedRound = 'HR Discussion';
-
-      setIsCustomRound(false);
-      setCustomRoundText('');
-      setSlotForm((prev) => ({
-        ...prev,
-        company_name: detectedCompany,
-        round_type: detectedRound,
-      }));
-    }, 800);
+      setScanStatusText(null);
+    }
   };
 
   const handleRemoveScreenshot = () => {
@@ -338,21 +393,37 @@ export default function CandidatePortal() {
     setInviteFile(null);
     setInvitePreviewUrl(null);
     setInviteVerified(false);
+    setOcrData(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Submit Slot Request
+  // Submit Slot Request with Strict Asterisk Field Validation
   const handleSubmitSlotRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!slotForm.company_name.trim()) return;
 
-    const effectiveRoundType = isCustomRound ? customRoundText.trim() : slotForm.round_type;
-    if (isCustomRound && !customRoundText.trim()) {
-      showToast('Please enter your custom round type.');
+    // 1. Strict Asterisk Validation
+    if (!slotForm.company_name.trim()) {
+      showToast('Please enter the company name.');
       return;
     }
 
-    // Strict Unified Slot Collision Prevention
+    const effectiveRoundType = isCustomRound ? customRoundText.trim() : slotForm.round_type;
+    if (isCustomRound && !customRoundText.trim()) {
+      showToast('Please enter your custom interview round type.');
+      return;
+    }
+
+    if (!slotForm.scheduled_date) {
+      showToast('Please select your interview date.');
+      return;
+    }
+
+    if (!slotForm.scheduled_time) {
+      showToast('Please select your interview time slot.');
+      return;
+    }
+
+    // 2. Strict Unified Slot Collision Prevention
     const collision = checkSlotCollision(
       slotForm.scheduled_time,
       slotForm.scheduled_date,
@@ -373,12 +444,8 @@ export default function CandidatePortal() {
       return;
     }
 
-    const noteDetails = [
-      slotForm.jd_text.trim() ? `JD: ${slotForm.jd_text.trim()}` : null,
-      inviteVerified ? '[Verified Invite Screenshot Attached]' : null,
-    ]
-      .filter(Boolean)
-      .join(' | ');
+    // 3. Serialize 24-hour proof payload into jd_text
+    const serializedJd = serializeSlotProof(slotForm.jd_text, ocrData);
 
     const newSlotPayload = {
       client_id: currentClient.id,
@@ -386,7 +453,7 @@ export default function CandidatePortal() {
       round_type: effectiveRoundType,
       scheduled_date: slotForm.scheduled_date,
       scheduled_time: slotForm.scheduled_time,
-      jd_text: noteDetails || null,
+      jd_text: serializedJd || null,
       status: 'requested' as const,
       round_fee: '0',
     };
@@ -801,82 +868,98 @@ export default function CandidatePortal() {
               </div>
             ) : (
               <div className="divide-y divide-zinc-800">
-                {mySlots.map((slot) => (
-                  <div key={slot.id} className="py-3.5 first:pt-0 last:pb-0 space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <strong className="text-sm font-extrabold text-white">
-                            {slot.company_name}
-                          </strong>
-                          <span className="text-xs text-zinc-400 font-medium">
-                            • {slot.round_type}
-                          </span>
-                          {slot.invite_verified && (
-                            <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full font-bold border border-emerald-500/30">
-                              ✓ Genuine Invite
+                {mySlots.map((slot) => {
+                  const proof = parseSlotProof(slot.jd_text);
+
+                  return (
+                    <div key={slot.id} className="py-3.5 first:pt-0 last:pb-0 space-y-2.5">
+                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2.5">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <strong className="text-sm font-extrabold text-white">
+                              {slot.company_name}
+                            </strong>
+                            <span className="text-xs text-zinc-400 font-medium">
+                              • {slot.round_type}
                             </span>
-                          )}
+                          </div>
+
+                          <div className="flex items-center gap-2 mt-1.5 text-xs text-zinc-300 font-mono flex-wrap">
+                            <div className="flex items-center gap-1">
+                              <Calendar className="w-3.5 h-3.5 text-zinc-500" />
+                              <span>{slot.scheduled_date}</span>
+                            </div>
+                            <span className="text-zinc-600">•</span>
+                            <strong className="text-white">{slot.scheduled_time}</strong>
+                          </div>
+
+                          {/* Verification Priority Status */}
+                          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                            {proof.hasScreenshot ? (
+                              <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full font-bold border border-emerald-500/30 flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>Verified Genuine Invite ({proof.confidence || 95}%)</span>
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-amber-400/90 bg-amber-500/10 px-2 py-0.5 rounded-full font-bold border border-amber-500/30 flex items-center gap-1">
+                                <span>⚠️ Unverified Invite (No Screenshot Attached)</span>
+                              </span>
+                            )}
+                          </div>
                         </div>
 
-                        <div className="flex items-center gap-2 mt-1.5 text-xs text-zinc-300 font-mono">
-                          <Calendar className="w-3.5 h-3.5 text-zinc-500" />
-                          <span>{slot.scheduled_date}</span>
-                          <span className="text-zinc-600">•</span>
-                          <strong className="text-white">{slot.scheduled_time}</strong>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col sm:flex-row items-end sm:items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditMySlot(slot)}
-                          className="inline-flex items-center gap-1 text-[11px] font-bold text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-                        >
-                          <Edit3 className="w-3 h-3 text-zinc-400" />
-                          <span>Reschedule</span>
-                        </button>
-                        <span
-                          className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 ${
-                            slot.status === 'approved'
-                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                              : slot.status === 'rescheduled'
-                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                              : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                          }`}
-                        >
-                          {slot.status === 'approved'
-                            ? 'Approved'
-                            : slot.status === 'rescheduled'
-                            ? 'Rescheduled (Pending Approval)'
-                            : 'Requested (Pending Approval)'}
-                        </span>
-                      </div>
-                    </div>
-
-                    {slot.meeting_link && (
-                      <div className="flex items-center gap-2 text-xs text-emerald-300 bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/20">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span>
-                          Meeting link ready:{' '}
-                          <a
-                            href={slot.meeting_link}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline font-bold text-white hover:text-emerald-300"
+                        {/* Actions & Status Badge - Responsive & never popping out */}
+                        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditMySlot(slot)}
+                            className="inline-flex items-center gap-1 text-[11px] font-bold text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-2.5 py-1 rounded-lg transition-colors cursor-pointer shrink-0"
                           >
-                            Join Video Call
-                          </a>
-                        </span>
+                            <Edit3 className="w-3 h-3 text-zinc-400" />
+                            <span>Reschedule</span>
+                          </button>
+                          <span
+                            className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 text-center ${
+                              slot.status === 'approved'
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                                : slot.status === 'rescheduled'
+                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                                : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                            }`}
+                          >
+                            {slot.status === 'approved'
+                              ? 'Approved'
+                              : slot.status === 'rescheduled'
+                              ? 'Rescheduled (Pending)'
+                              : 'Pending Approval'}
+                          </span>
+                        </div>
                       </div>
-                    )}
 
-                    <div className="flex items-center gap-2 text-xs text-zinc-300 bg-black/60 p-2.5 rounded-xl border border-zinc-800">
-                      <MessageCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      <span>Mentor connects with you on WhatsApp before your slot for prep drills.</span>
+                      {slot.meeting_link && (
+                        <div className="flex items-center gap-2 text-xs text-emerald-300 bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/20">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span>
+                            Meeting link ready:{' '}
+                            <a
+                              href={slot.meeting_link}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline font-bold text-white hover:text-emerald-300"
+                            >
+                              Join Video Call
+                            </a>
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-2 text-xs text-zinc-300 bg-black/60 p-2.5 rounded-xl border border-zinc-800">
+                        <MessageCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span>Mentor connects with you on WhatsApp before your slot for prep drills.</span>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -907,11 +990,12 @@ export default function CandidatePortal() {
                     (slot.client?.full_name
                       ? `${slot.client.full_name.split(' ')[0]} ${slot.client.full_name.split(' ')[1]?.[0] || ''}.`
                       : 'Candidate');
+                  const proof = parseSlotProof(slot.jd_text);
 
                   return (
-                    <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between text-xs">
+                    <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between text-xs gap-2">
                       <div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="font-extrabold text-white">{slot.company_name}</span>
                           <span className="text-zinc-400 font-mono text-[11px]">
                             ({candName})
@@ -922,10 +1006,21 @@ export default function CandidatePortal() {
                             </span>
                           )}
                         </div>
-                        <span className="text-[11px] text-zinc-400">{slot.round_type}</span>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <span className="text-[11px] text-zinc-400">{slot.round_type}</span>
+                          {proof.hasScreenshot ? (
+                            <span className="text-[9px] text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/20">
+                              ✓ Verified
+                            </span>
+                          ) : (
+                            <span className="text-[9px] text-amber-400/80 font-bold bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/20">
+                              ⚠️ Unverified
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      <div className="text-right font-mono text-[11px] text-zinc-300">
+                      <div className="text-right font-mono text-[11px] text-zinc-300 shrink-0">
                         <div>{slot.scheduled_date}</div>
                         <strong className="text-white">{slot.scheduled_time}</strong>
                       </div>
@@ -963,11 +1058,17 @@ export default function CandidatePortal() {
               </button>
             </div>
 
-            {/* Screenshot Dropzone */}
+            {/* Screenshot Dropzone - OPTIONAL (NO ASTERISK) */}
             <div>
-              <label className="block text-xs font-bold text-zinc-300 mb-1.5">
-                Interview Invite Screenshot *
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-bold text-zinc-300">
+                  Interview Invite Screenshot (Optional)
+                </label>
+                <span className="text-[10px] text-zinc-400 font-medium">Non-mandatory</span>
+              </div>
+              <p className="text-[11px] text-zinc-400 mb-2 leading-relaxed">
+                Upload your recruiter email or calendar invite screenshot. Verified genuine invites are prioritized by mentors and admin. Screenshots are kept for 24 hours for review, then auto-purged to save cloud space.
+              </p>
 
               {!inviteFile ? (
                 <div
@@ -992,10 +1093,10 @@ export default function CandidatePortal() {
                   />
                   <Upload className="w-5 h-5 mx-auto mb-1.5 text-zinc-400" />
                   <strong className="block text-xs font-extrabold text-white">
-                    Drop invite screenshot here
+                    Drop invite screenshot here (Optional)
                   </strong>
                   <span className="block text-[11px] text-zinc-400 mt-0.5">
-                    or tap to choose · Gmail, Outlook, Teams, Zoom
+                    or tap to choose · Gmail, Outlook, Teams, Zoom, HackerRank
                   </span>
                 </div>
               ) : (
@@ -1014,7 +1115,7 @@ export default function CandidatePortal() {
                           {inviteFile.name}
                         </p>
                         <span className="text-[10px] text-zinc-400 font-mono">
-                          In-memory verification
+                          24-Hour retention
                         </span>
                       </div>
                     </div>
@@ -1030,12 +1131,12 @@ export default function CandidatePortal() {
                   {isScanningInvite ? (
                     <div className="flex items-center gap-2 text-xs text-zinc-300 pt-2 border-t border-zinc-800">
                       <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                      <span>Verifying invite authenticity...</span>
+                      <span>{scanStatusText || 'Running OCR scan on invite email & schedule...'}</span>
                     </div>
                   ) : inviteVerified ? (
                     <div className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-xl">
                       <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>Genuine Recruiter Invite Verified</span>
+                      <span>Genuine Recruiter Invite Verified ({ocrData?.confidence || 95}% match)</span>
                     </div>
                   ) : null}
                 </div>
@@ -1044,7 +1145,7 @@ export default function CandidatePortal() {
               <div className="flex items-start gap-1.5 mt-2 text-[11px] text-zinc-400">
                 <ShieldCheck className="w-3.5 h-3.5 text-zinc-500 shrink-0 mt-0.5" />
                 <span>
-                  Privacy guarantee: The screenshot is verified in memory and <strong>never saved on our server</strong>.
+                  Storage policy: Screenshots are stored for <strong>24 hours</strong> so admin can inspect and confirm genuineness, then automatically purged from the cloud database to save space.
                 </span>
               </div>
             </div>

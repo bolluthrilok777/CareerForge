@@ -29,6 +29,7 @@ import {
   getTimeSlotsAvailability,
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
+import { parseSlotProof, serializeSlotProof } from '@/lib/inviteProof';
 
 function getUpcomingDates(): { dateStr: string; label: string; dayName: string }[] {
   const dates = [];
@@ -57,11 +58,21 @@ export default function InstantEmergencyBookingPage() {
   const [selectedTime, setSelectedTime] = useState('02:30 PM IST');
   const [jdNotes, setJdNotes] = useState('');
 
-  // In-Memory Invite Screenshot Scanner (Zero server storage)
+  // Real OCR Recruiter Invite Scanner (24-Hour retention)
   const [inviteFile, setInviteFile] = useState<File | null>(null);
   const [invitePreviewUrl, setInvitePreviewUrl] = useState<string | null>(null);
   const [isScanningInvite, setIsScanningInvite] = useState(false);
   const [inviteVerified, setInviteVerified] = useState<boolean>(false);
+  const [ocrData, setOcrData] = useState<{
+    preview_data_url?: string;
+    uploaded_at?: string;
+    expires_at?: string;
+    confidence?: number;
+    isGenuine?: boolean;
+    verificationSignals?: string[];
+    meetingLink?: string | null;
+  } | null>(null);
+  const [scanStatusText, setScanStatusText] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [existingSlots, setExistingSlots] = useState<DatabaseInterviewSlot[]>([]);
@@ -104,44 +115,86 @@ export default function InstantEmergencyBookingPage() {
     (s) => s.scheduled_date === selectedDate && s.status !== 'cancelled' && s.status !== 'declined'
   );
 
-  // Handle Drop Invite Screenshot
-  const handleDropInvite = (file: File) => {
-    if (!file || !file.type.startsWith('image/')) return;
+  // Handle Real OCR Drop Invite Screenshot (24-Hour retention)
+  const handleDropInvite = async (file: File) => {
+    if (!file || !file.type.startsWith('image/')) {
+      setErrorMessage('Please select a valid image file (PNG, JPG, or WEBP).');
+      return;
+    }
     setInviteFile(file);
-    const url = URL.createObjectURL(file);
-    setInvitePreviewUrl(url);
+    const localUrl = URL.createObjectURL(file);
+    setInvitePreviewUrl(localUrl);
     setIsScanningInvite(true);
     setInviteVerified(false);
+    setScanStatusText('Scanning invitation text, schedule & recruiter details...');
 
-    setTimeout(() => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/scan-invite', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const json = await res.json();
+
+      if (json.success && json.isGenuine) {
+        setInviteVerified(true);
+        setOcrData({
+          preview_data_url: json.screenshot_storage?.preview_data_url,
+          uploaded_at: json.screenshot_storage?.uploaded_at,
+          expires_at: json.screenshot_storage?.expires_at,
+          confidence: json.confidence,
+          isGenuine: json.isGenuine,
+          verificationSignals: json.verificationSignals,
+          meetingLink: json.meetingLink,
+        });
+
+        if (json.detectedCompany) {
+          setCompanyName(json.detectedCompany);
+        }
+
+        if (json.detectedDate) {
+          setSelectedDate(json.detectedDate);
+        }
+
+        if (json.detectedTime) {
+          setSelectedTime(json.detectedTime);
+        }
+
+        if (json.detectedRound) {
+          if (
+            ['Technical Coding L1', 'System Design L2', 'Screening Round', 'Hiring Manager L3', 'HR Discussion'].includes(
+              json.detectedRound
+            )
+          ) {
+            setRoundType(json.detectedRound);
+            setIsCustomRound(false);
+          } else {
+            setIsCustomRound(true);
+            setCustomRoundText(json.detectedRound);
+          }
+        }
+      } else {
+        setInviteVerified(false);
+        setOcrData({
+          preview_data_url: json.screenshot_storage?.preview_data_url,
+          uploaded_at: json.screenshot_storage?.uploaded_at,
+          expires_at: json.screenshot_storage?.expires_at,
+          confidence: json.confidence || 40,
+          isGenuine: false,
+          verificationSignals: json.verificationSignals || [],
+          meetingLink: json.meetingLink,
+        });
+      }
+    } catch (err) {
+      console.error('Scan error:', err);
+      setInviteVerified(false);
+    } finally {
       setIsScanningInvite(false);
-      setInviteVerified(true);
-
-      const lower = file.name.toLowerCase();
-      let detectedCompany = '';
-      if (lower.includes('swiggy')) detectedCompany = 'Swiggy';
-      else if (lower.includes('wells') || lower.includes('wfg')) detectedCompany = 'Wells Fargo';
-      else if (lower.includes('epam')) detectedCompany = 'EPAM Systems';
-      else if (lower.includes('google')) detectedCompany = 'Google';
-      else if (lower.includes('amazon')) detectedCompany = 'Amazon';
-      else if (lower.includes('oracle')) detectedCompany = 'Oracle';
-      else if (lower.includes('phonepe')) detectedCompany = 'PhonePe';
-
-      if (detectedCompany && !companyName) {
-        setCompanyName(detectedCompany);
-      }
-
-      if (lower.includes('l2') || lower.includes('design')) {
-        setRoundType('System Design L2');
-        setIsCustomRound(false);
-      } else if (lower.includes('final') || lower.includes('manager')) {
-        setRoundType('Hiring Manager L3');
-        setIsCustomRound(false);
-      } else if (lower.includes('hr')) {
-        setRoundType('HR Discussion');
-        setIsCustomRound(false);
-      }
-    }, 800);
+      setScanStatusText(null);
+    }
   };
 
   const handleRemoveScreenshot = () => {
@@ -149,6 +202,7 @@ export default function InstantEmergencyBookingPage() {
     setInviteFile(null);
     setInvitePreviewUrl(null);
     setInviteVerified(false);
+    setOcrData(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -203,11 +257,13 @@ export default function InstantEmergencyBookingPage() {
 
       if (existingClients && existingClients.length > 0) {
         clientId = existingClients[0].id;
-        // Ensure client is tagged as per_round
-        await supabase
-          .from('clients')
-          .update({ client_type: 'per_round' })
-          .eq('id', clientId);
+        // Safeguard: NEVER downgrade an enrolled retainer client to per_round!
+        if (existingClients[0].client_type !== 'full_package') {
+          await supabase
+            .from('clients')
+            .update({ client_type: 'per_round' })
+            .eq('id', clientId);
+        }
       } else {
         const newClientPayload = {
           full_name: fullName.trim(),
@@ -233,23 +289,19 @@ export default function InstantEmergencyBookingPage() {
         clientId = insertedClient[0].id;
       }
 
-      // 2. Insert interview slot using strictly verified table schema
-      const noteDetails = [
-        jdNotes.trim() ? `JD: ${jdNotes.trim()}` : null,
-        inviteVerified ? '[Verified Invite Screenshot Verified]' : null,
-      ]
-        .filter(Boolean)
-        .join(' | ');
+      // 2. Insert interview slot using 24-hour proof metadata
+      const serializedJd = serializeSlotProof(jdNotes, ocrData);
 
       const newSlotPayload = {
         client_id: clientId,
+        candidate_name: fullName.trim(),
         company_name: companyName.trim(),
         round_type: effectiveRoundType,
         scheduled_date: selectedDate,
         scheduled_time: selectedTime,
-        jd_text: noteDetails || null,
+        jd_text: serializedJd || null,
         status: 'requested' as const,
-        round_fee: 'Emergency Round',
+        round_fee: '₹3,000',
       };
 
       const { data: insertedSlots, error: slotError } = await supabase
@@ -326,9 +378,24 @@ export default function InstantEmergencyBookingPage() {
                 <span className="text-zinc-500">Date</span>
                 <span className="text-white">{bookedSuccess.scheduled_date}</span>
               </div>
-              <div className="flex justify-between items-center">
+              <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
                 <span className="text-zinc-500">Time (IST)</span>
                 <strong className="text-emerald-400">{bookedSuccess.scheduled_time}</strong>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-zinc-500">Verification</span>
+                {(() => {
+                  const proof = parseSlotProof(bookedSuccess.jd_text);
+                  return proof.hasScreenshot ? (
+                    <span className="text-emerald-400 font-bold font-sans flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Verified Genuine Invite ({proof.confidence || 95}%)
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 font-bold font-sans">
+                      ⚠️ Unverified Invite (No Screenshot Attached)
+                    </span>
+                  );
+                })()}
               </div>
             </div>
 
@@ -389,18 +456,19 @@ export default function InstantEmergencyBookingPage() {
         )}
 
         {/* ======================================================== */}
-        {/* SCREENSHOT DROPZONE (VERIFY GENUINITY, 0 STORAGE USED)    */}
+        {/* SCREENSHOT DROPZONE (OPTIONAL - NO ASTERISK)             */}
         {/* ======================================================== */}
         <div className="bg-[#111113] border border-zinc-800 rounded-3xl p-5 sm:p-6 space-y-4 shadow-2xl">
           <div>
-            <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center justify-between mb-1">
               <label className="text-xs font-bold text-zinc-300">
-                Recruiter Invite Screenshot (Genuineness Check)
+                Interview Invite Screenshot (Optional)
               </label>
-              <span className="text-[10px] text-zinc-500 font-mono">
-                Scanned in memory
-              </span>
+              <span className="text-[10px] text-zinc-400 font-medium">Non-mandatory</span>
             </div>
+            <p className="text-[11px] text-zinc-400 mb-2 leading-relaxed">
+              Upload your recruiter email or calendar invite screenshot. Verified genuine invites are prioritized by emergency mentors and admin. Screenshots are kept for 24 hours for review, then auto-purged to save cloud space.
+            </p>
 
             {!inviteFile ? (
               <div
@@ -425,10 +493,10 @@ export default function InstantEmergencyBookingPage() {
                 />
                 <Upload className="w-5 h-5 mx-auto mb-1.5 text-zinc-400" />
                 <strong className="block text-xs font-extrabold text-white">
-                  Drop invite screenshot here
+                  Drop invite screenshot here (Optional)
                 </strong>
                 <span className="block text-[11px] text-zinc-400 mt-0.5">
-                  or tap to choose · Gmail, Outlook, Teams, Zoom
+                  or tap to choose · Gmail, Outlook, Teams, Zoom, HackerRank
                 </span>
               </div>
             ) : (
@@ -447,7 +515,7 @@ export default function InstantEmergencyBookingPage() {
                         {inviteFile.name}
                       </p>
                       <span className="text-[10px] text-zinc-400 font-mono">
-                        In-memory verification
+                        24-Hour retention
                       </span>
                     </div>
                   </div>
@@ -463,12 +531,12 @@ export default function InstantEmergencyBookingPage() {
                 {isScanningInvite ? (
                   <div className="flex items-center gap-2 text-xs text-zinc-300 pt-2 border-t border-zinc-800">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                    <span>Verifying invite authenticity...</span>
+                    <span>{scanStatusText || 'Running OCR scan on invite email & schedule...'}</span>
                   </div>
                 ) : inviteVerified ? (
                   <div className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-xl">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Genuine Recruiter Invite Verified</span>
+                    <span>Genuine Recruiter Invite Verified ({ocrData?.confidence || 95}% match)</span>
                   </div>
                 ) : null}
               </div>
@@ -477,7 +545,7 @@ export default function InstantEmergencyBookingPage() {
             <div className="flex items-start gap-1.5 mt-2 text-[11px] text-zinc-400">
               <ShieldCheck className="w-3.5 h-3.5 text-zinc-500 shrink-0 mt-0.5" />
               <span>
-                Privacy guarantee: The screenshot is verified in memory and <strong>never saved to our server quota</strong>.
+                Storage policy: Screenshots are stored for <strong>24 hours</strong> so admin can inspect and confirm genuineness, then automatically purged from the cloud database to save space.
               </span>
             </div>
           </div>

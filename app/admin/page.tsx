@@ -22,7 +22,9 @@ import {
   ShieldCheck,
   ArrowRight,
   Zap,
-  Plus
+  Plus,
+  Eye,
+  CheckCircle2
 } from 'lucide-react';
 import {
   supabase,
@@ -37,6 +39,7 @@ import {
   getTimeSlotsAvailability,
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
+import { parseSlotProof, SlotProofMetadata } from '@/lib/inviteProof';
 
 function getUpcomingAdminDates(): { dateStr: string; label: string; dayName: string }[] {
   const dates = [];
@@ -146,6 +149,15 @@ export default function MobileAdminCommandCenter() {
 
   // Leads Filter State
   const [leadFilter, setLeadFilter] = useState<'all' | 'active' | 'converted'>('all');
+
+  // Slots Filter State (Differentiate Emergency vs Retainer Candidates)
+  const [slotFilter, setSlotFilter] = useState<'all' | 'candidates' | 'emergency'>('all');
+
+  // Proof Screenshot Modal State (24h Retention Inspection)
+  const [viewingProofSlot, setViewingProofSlot] = useState<{
+    slot: DatabaseInterviewSlot;
+    proof: SlotProofMetadata;
+  } | null>(null);
 
   // Restore auth
   useEffect(() => {
@@ -602,6 +614,26 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
+  const handleSetSlotStatus = async (slotId: string, newStatus: DatabaseInterviewSlot['status']) => {
+    try {
+      await supabase
+        .from('interview_slots')
+        .update({ status: newStatus })
+        .eq('id', slotId);
+
+      setSlots((prev) =>
+        prev.map((s) => (s.id === slotId ? { ...s, status: newStatus } : s))
+      );
+      broadcastSync('SLOT_UPDATED', { slotId, status: newStatus });
+      showToast(`Slot marked as ${newStatus}`);
+    } catch {
+      setSlots((prev) =>
+        prev.map((s) => (s.id === slotId ? { ...s, status: newStatus } : s))
+      );
+      showToast(`Slot marked as ${newStatus}`);
+    }
+  };
+
   const handleDeleteSlot = async (slotId: string) => {
     if (!confirm('Delete this interview slot?')) return;
     try {
@@ -751,11 +783,8 @@ export default function MobileAdminCommandCenter() {
 
       if (existingClient) {
         clientId = existingClient.id;
-        createdClient = { ...existingClient, client_type: 'per_round' };
-        await supabase
-          .from('clients')
-          .update({ client_type: 'per_round' })
-          .eq('id', clientId);
+        createdClient = existingClient;
+        // Do NOT overwrite full_package client_type if candidate is an enrolled retainer candidate!
       } else {
         const clientPayload = {
           full_name: emergencyForm.candidate_name.trim(),
@@ -782,6 +811,7 @@ export default function MobileAdminCommandCenter() {
         clientId = createdClient.id;
       }
 
+      const agreedFee = emergencyForm.round_fee.trim() || '₹3,000';
       const slotPayload = {
         client_id: clientId,
         company_name: emergencyForm.company_name.trim(),
@@ -789,7 +819,8 @@ export default function MobileAdminCommandCenter() {
         scheduled_date: emergencyForm.scheduled_date,
         scheduled_time: emergencyForm.scheduled_time,
         status: 'approved' as const,
-        round_fee: emergencyForm.round_fee,
+        round_fee: agreedFee,
+        jd_text: `[Emergency Per-Round Booking] Agreed Fee: ${agreedFee} | Priority Mentor Clearance`,
       };
 
       const { data: insertedSlot, error: slotErr } = await supabase
@@ -933,8 +964,38 @@ export default function MobileAdminCommandCenter() {
     return true;
   });
 
-  // Group slots by date
-  const slotsGroupedByDate = slots.reduce<Record<string, DatabaseInterviewSlot[]>>((acc, slot) => {
+  // Helper to reliably distinguish Emergency/Instant per-round slots vs Enrolled Retainer Candidates
+  const isEmergencySlot = (slot: DatabaseInterviewSlot): boolean => {
+    const client = clients.find((c) => c.id === slot.client_id) || slot.client;
+    // 1. If client is purely a per_round client
+    if (client?.client_type === 'per_round') return true;
+    // 2. If slot has explicit per-round fee
+    if (
+      slot.round_fee &&
+      slot.round_fee !== '0' &&
+      slot.round_fee !== 'Included' &&
+      slot.round_fee !== 0
+    ) {
+      return true;
+    }
+    // 3. If tagged in candidate name or notes
+    if (slot.candidate_name && /emergency|instant/i.test(slot.candidate_name)) return true;
+    if (slot.jd_text && /emergency|instant/i.test(slot.jd_text)) return true;
+    return false;
+  };
+
+  const emergencySlotsCount = slots.filter(isEmergencySlot).length;
+  const candidateSlotsCount = slots.length - emergencySlotsCount;
+
+  // Filter slots by Admin selection
+  const filteredSlots = slots.filter((slot) => {
+    if (slotFilter === 'emergency') return isEmergencySlot(slot);
+    if (slotFilter === 'candidates') return !isEmergencySlot(slot);
+    return true;
+  });
+
+  // Group filtered slots by date
+  const slotsGroupedByDate = filteredSlots.reduce<Record<string, DatabaseInterviewSlot[]>>((acc, slot) => {
     const d = slot.scheduled_date || 'Unscheduled';
     if (!acc[d]) acc[d] = [];
     acc[d].push(slot);
@@ -1200,18 +1261,63 @@ export default function MobileAdminCommandCenter() {
             )}
 
             <div className="bg-[#111113] border border-zinc-800 rounded-2xl p-4 space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80">
-                <h2 className="text-xs font-extrabold uppercase tracking-wider text-white">
-                  Master Interview Schedule
-                </h2>
-                <span className="text-xs text-zinc-400 font-mono font-bold">
-                  {slots.length} Total
-                </span>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2 border-b border-zinc-800/80">
+                <div>
+                  <h2 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                    Master Interview Schedule
+                  </h2>
+                  <p className="text-[11px] text-zinc-400">
+                    Showing {filteredSlots.length} of {slots.length} interviews scheduled
+                  </p>
+                </div>
+
+                {/* Filter Pills to clearly differentiate Retainer Candidates vs Emergency */}
+                <div className="flex items-center gap-1 p-1 bg-black border border-zinc-800 rounded-xl overflow-x-auto scrollbar-none">
+                  <button
+                    type="button"
+                    onClick={() => setSlotFilter('all')}
+                    className={`px-2.5 py-1 text-[11px] font-bold rounded-lg transition-colors cursor-pointer shrink-0 ${
+                      slotFilter === 'all'
+                        ? 'bg-white text-black font-extrabold shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    All ({slots.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSlotFilter('candidates')}
+                    className={`px-2.5 py-1 text-[11px] font-bold rounded-lg transition-colors flex items-center gap-1 cursor-pointer shrink-0 ${
+                      slotFilter === 'candidates'
+                        ? 'bg-blue-500 text-white font-extrabold shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <ShieldCheck className="w-3 h-3" />
+                    <span>Retainer Candidates ({candidateSlotsCount})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSlotFilter('emergency')}
+                    className={`px-2.5 py-1 text-[11px] font-bold rounded-lg transition-colors flex items-center gap-1 cursor-pointer shrink-0 ${
+                      slotFilter === 'emergency'
+                        ? 'bg-amber-400 text-black font-extrabold shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <Zap className="w-3 h-3 fill-current" />
+                    <span>Instant Emergency ({emergencySlotsCount})</span>
+                  </button>
+                </div>
               </div>
 
               {Object.keys(slotsGroupedByDate).length === 0 ? (
                 <div className="text-center py-6 text-xs text-zinc-400">
-                  No interview slots scheduled yet.
+                  {slotFilter === 'emergency'
+                    ? 'No emergency slots match the current filter.'
+                    : slotFilter === 'candidates'
+                    ? 'No candidate slots match the current filter.'
+                    : 'No interview slots scheduled yet.'}
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -1235,15 +1341,15 @@ export default function MobileAdminCommandCenter() {
                           {dateSlots.map((slot) => {
                             const client = clients.find((c) => c.id === slot.client_id) || slot.client;
                             const candName = slot.candidate_name || client?.full_name || 'Candidate';
-                            const isEmergency =
-                              client?.client_type === 'per_round' ||
-                              (Boolean(slot.round_fee) && slot.round_fee !== '0' && slot.round_fee !== 0);
+                            const isEmergency = isEmergencySlot(slot);
                             const feeDisplay =
-                              slot.round_fee && slot.round_fee !== '0' && slot.round_fee !== 0
+                              slot.round_fee && slot.round_fee !== '0' && slot.round_fee !== 'Included' && slot.round_fee !== 0
                                 ? (typeof slot.round_fee === 'string' && slot.round_fee.startsWith('₹')
                                     ? slot.round_fee
                                     : `₹${slot.round_fee}`)
                                 : '₹3,000';
+
+                            const slotProof = parseSlotProof(slot.jd_text);
 
                             return (
                               <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0">
@@ -1256,12 +1362,8 @@ export default function MobileAdminCommandCenter() {
                                       <span className="text-[11px] text-zinc-400">
                                         ({candName})
                                       </span>
-                                      {slot.invite_verified && (
-                                        <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded font-bold border border-emerald-500/30">
-                                          ✓ Genuine Invite
-                                        </span>
-                                      )}
                                     </div>
+
                                     <div className="text-[11px] text-zinc-400">
                                       {slot.round_type}
                                     </div>
@@ -1269,17 +1371,47 @@ export default function MobileAdminCommandCenter() {
                                       {slot.scheduled_time}
                                     </div>
 
-                                    {/* Visual Client Type Distinction Badges */}
-                                    <div className="pt-0.5">
+                                    {/* Clear Visual Client Type & Fee Distinction */}
+                                    <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                                       {isEmergency ? (
-                                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/30">
-                                          <Zap className="w-2.5 h-2.5 fill-emerald-400" />
-                                          Emergency Per-Round - Fee: {feeDisplay}
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/30">
+                                          <Zap className="w-2.5 h-2.5 fill-amber-300" />
+                                          Instant Emergency • Fee: {feeDisplay}
                                         </span>
                                       ) : (
                                         <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-md border border-blue-500/30">
                                           <ShieldCheck className="w-2.5 h-2.5" />
-                                          Full Retainer Client
+                                          Enrolled Retainer Candidate • Fee: Included (₹0)
+                                        </span>
+                                      )}
+
+                                      {/* Verified Screenshot Proof Status (24h retention) */}
+                                      {slotProof.hasScreenshot ? (
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded font-bold border border-emerald-500/30 flex items-center gap-1">
+                                            <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                                            Verified Invite ({slotProof.confidence || 95}%)
+                                          </span>
+                                          {slotProof.screenshotPreviewUrl && !slotProof.isExpired && (
+                                            <button
+                                              type="button"
+                                              onClick={() => setViewingProofSlot({ slot, proof: slotProof })}
+                                              className="text-[10px] text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 px-2 py-0.5 rounded font-bold border border-zinc-700 flex items-center gap-1 transition-colors cursor-pointer"
+                                              title="Inspect recruiter invite screenshot (24-hour retention)"
+                                            >
+                                              <Eye className="w-3 h-3 text-cyan-400" />
+                                              <span>View Invite (24h)</span>
+                                            </button>
+                                          )}
+                                          {slotProof.isExpired && (
+                                            <span className="text-[10px] text-zinc-500 font-mono">
+                                              (Proof purged after 24h)
+                                            </span>
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <span className="text-[10px] text-amber-400/90 bg-amber-500/10 px-1.5 py-0.5 rounded font-bold border border-amber-500/30 inline-flex items-center gap-1">
+                                          ⚠️ Unverified (No Screenshot Attached)
                                         </span>
                                       )}
                                     </div>
@@ -1577,21 +1709,21 @@ export default function MobileAdminCommandCenter() {
               ) : (
                 <div className="divide-y divide-zinc-800">
                   {displayedLeads.map((l) => (
-                    <div key={l.id} className="py-3 first:pt-0 last:pb-0 space-y-1.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
+                    <div key={l.id} className="py-3 first:pt-0 last:pb-0 space-y-2">
+                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2.5">
+                        <div className="min-w-0">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <strong className="text-xs font-extrabold text-white">
+                            <strong className="text-xs font-extrabold text-white truncate">
                               {l.full_name}
                             </strong>
                             {l.status === 'Converted' && (
-                              <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30">
+                              <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30 shrink-0">
                                 ✓ Enrolled Candidate
                               </span>
                             )}
                           </div>
-                          <span className="text-[11px] text-zinc-400 block">{l.tech_stack}</span>
-                          <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-300 font-mono">
+                          <span className="text-[11px] text-zinc-400 block truncate">{l.tech_stack}</span>
+                          <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-300 font-mono flex-wrap">
                             <span>CTC: {l.current_ctc_lpa} LPA</span>
                             <span>•</span>
                             <span>Notice: {l.notice_period}</span>
@@ -1600,31 +1732,29 @@ export default function MobileAdminCommandCenter() {
                           </div>
                         </div>
 
-                        <div className="text-right shrink-0 space-y-1.5">
+                        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 flex-wrap">
                           {/* 1-Click Convert or Converted Indicator */}
                           {l.status === 'Converted' ? (
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                type="button"
-                                onClick={() => setActiveTab('clients')}
-                                className="inline-flex items-center gap-1 text-[10px] font-bold text-white bg-zinc-900 hover:bg-zinc-800 px-2.5 py-1 rounded-lg border border-zinc-700 transition-colors shadow-sm"
-                              >
-                                <span>View in Candidates</span>
-                                <ArrowRight className="w-2.5 h-2.5" />
-                              </button>
-                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('clients')}
+                              className="inline-flex items-center gap-1 text-[10px] font-bold text-white bg-zinc-900 hover:bg-zinc-800 px-2.5 py-1 rounded-lg border border-zinc-700 transition-colors shadow-sm cursor-pointer shrink-0"
+                            >
+                              <span>View in Candidates</span>
+                              <ArrowRight className="w-2.5 h-2.5" />
+                            </button>
                           ) : (
                             <button
                               type="button"
                               onClick={() => handleConvertLead(l)}
-                              className="inline-flex items-center gap-1 text-[11px] font-extrabold text-black bg-white hover:bg-zinc-200 px-3 py-1 rounded-lg transition-colors shadow-sm"
+                              className="inline-flex items-center gap-1 text-[11px] font-extrabold text-black bg-white hover:bg-zinc-200 px-3 py-1 rounded-lg transition-colors shadow-sm cursor-pointer shrink-0"
                             >
                               <UserPlus className="w-3 h-3 text-black" />
                               <span>Convert & Enroll</span>
                             </button>
                           )}
 
-                          <div className="flex items-center justify-end gap-1.5">
+                          <div className="flex items-center gap-1.5">
                             {/* Note button */}
                             <button
                               type="button"
@@ -2515,6 +2645,147 @@ export default function MobileAdminCommandCenter() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 24-HOUR PROOF INSPECTION MODAL (CONSERVE CLOUD STORAGE)  */}
+      {/* ======================================================== */}
+      {viewingProofSlot && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-[#111113] border border-zinc-800 rounded-3xl p-6 max-w-lg w-full shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-extrabold text-white">
+                    Interview Invite Verification
+                  </h2>
+                  <p className="text-[10px] text-zinc-400">
+                    Retained for 24 hours · Auto-purged from cloud to save storage
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingProofSlot(null)}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {/* Slot details */}
+              <div className="bg-black/60 border border-zinc-800 rounded-xl p-3 space-y-1.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Company & Round:</span>
+                  <strong className="text-white font-bold">
+                    {viewingProofSlot.slot.company_name} · {viewingProofSlot.slot.round_type}
+                  </strong>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Schedule:</span>
+                  <span className="text-zinc-200 font-mono">
+                    {viewingProofSlot.slot.scheduled_date} at {viewingProofSlot.slot.scheduled_time}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Authenticity Score:</span>
+                  <span className="text-emerald-400 font-bold font-mono">
+                    {viewingProofSlot.proof.confidence || 95}% Genuine Match
+                  </span>
+                </div>
+                {viewingProofSlot.proof.expiresAt && (
+                  <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60 text-[11px]">
+                    <span className="text-amber-400">24-Hr Auto Purge:</span>
+                    <span className="text-zinc-400 font-mono">
+                      Expires {new Date(viewingProofSlot.proof.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ({new Date(viewingProofSlot.proof.expiresAt).toLocaleDateString()})
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* OCR Verification Signals */}
+              {viewingProofSlot.proof.signals && viewingProofSlot.proof.signals.length > 0 && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+                    Detected Verification Signals
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {viewingProofSlot.proof.signals.map((sig, idx) => (
+                      <span
+                        key={idx}
+                        className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-md font-semibold"
+                      >
+                        ✓ {sig}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Screenshot Image Preview */}
+              {viewingProofSlot.proof.screenshotPreviewUrl ? (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+                    Recruiter Invite Screenshot Proof
+                  </label>
+                  <div className="border border-zinc-800 rounded-xl overflow-hidden bg-black p-1 max-h-72 overflow-y-auto">
+                    <img
+                      src={viewingProofSlot.proof.screenshotPreviewUrl}
+                      alt="Interview Invite Screenshot"
+                      className="w-full object-contain rounded-lg"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-xl text-center text-xs text-zinc-400">
+                  Screenshot has expired after 24 hours and was automatically purged to save cloud storage.
+                </div>
+              )}
+
+              {/* Meeting link if extracted */}
+              {viewingProofSlot.proof.meetingLink && (
+                <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs flex items-center justify-between">
+                  <span className="text-emerald-300">Extracted Video Call Link:</span>
+                  <a
+                    href={viewingProofSlot.proof.meetingLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-white font-mono underline font-bold hover:text-emerald-300 truncate max-w-xs"
+                  >
+                    {viewingProofSlot.proof.meetingLink}
+                  </a>
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setViewingProofSlot(null)}
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800 cursor-pointer"
+                >
+                  Close
+                </button>
+                {viewingProofSlot.slot.status !== 'approved' && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await handleSetSlotStatus(viewingProofSlot.slot.id, 'approved');
+                      setViewingProofSlot(null);
+                    }}
+                    className="flex-1 bg-emerald-400 hover:bg-emerald-300 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors cursor-pointer"
+                  >
+                    ✓ Approve Verified Slot
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
