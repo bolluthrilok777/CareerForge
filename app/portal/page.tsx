@@ -34,79 +34,9 @@ import {
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
 
-// Fallback Mock Clients & Cohort Slots for offline resilience
-const FALLBACK_CLIENTS: DatabaseClient[] = [
-  {
-    id: 'cli-1',
-    full_name: 'Karthik Raja',
-    whatsapp_number: '+919988776655',
-    tech_stack: 'DevOps / Cloud Architecture (AWS / K8s)',
-    current_ctc_lpa: '18.0',
-    fee_status: 'registration_paid_20k',
-    naukri_status: 'Optimized',
-    linkedin_status: 'Optimized',
-    profiles_status: 'Optimized',
-    resume_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-    notes: 'Enrolled in sprint.',
-    created_at: '2026-10-16T12:00:00.000Z',
-  },
-  {
-    id: 'cli-2',
-    full_name: 'Sneha Patel',
-    whatsapp_number: '+919811223344',
-    tech_stack: 'React / Node.js / Full Stack TypeScript',
-    current_ctc_lpa: '12.5',
-    fee_status: 'offer_locked',
-    naukri_status: 'in_progress',
-    linkedin_status: 'in_progress',
-    profiles_status: 'in_progress',
-    resume_url: null,
-    notes: 'Offer stage in progress.',
-    created_at: '2026-10-14T12:00:00.000Z',
-  },
-];
-
-const INITIAL_COHORT_SLOTS: DatabaseInterviewSlot[] = [
-  {
-    id: 'conf-1',
-    client_id: 'cli-1',
-    candidate_name: 'Karthik R.',
-    company_name: 'Wells Fargo',
-    round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '02:30 PM IST',
-    jd_text: 'Core Java, Multithreading, ConcurrentHashMap, Spring Cloud Gateway.',
-    status: 'approved',
-    priority: 'urgent',
-    invite_verified: true,
-  },
-  {
-    id: 'conf-2',
-    client_id: 'cli-2',
-    candidate_name: 'Sneha P.',
-    company_name: 'PhonePe',
-    round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '04:00 PM IST',
-    jd_text: 'Frontend Architecture, Next.js hydration, React state machines.',
-    status: 'approved',
-    priority: 'standard',
-    invite_verified: true,
-  },
-  {
-    id: 'conf-3',
-    client_id: 'cli-3',
-    candidate_name: 'Arjun N.',
-    company_name: 'EPAM Systems',
-    round_type: 'System Design L2',
-    scheduled_date: '2026-10-22',
-    scheduled_time: '11:00 AM IST',
-    jd_text: 'Distributed cache with Redis, Kafka event streaming, Postgres sharding.',
-    status: 'approved',
-    priority: 'urgent',
-    invite_verified: true,
-  },
-];
+// Production Client & Cohort State
+const FALLBACK_CLIENTS: DatabaseClient[] = [];
+const INITIAL_COHORT_SLOTS: DatabaseInterviewSlot[] = [];
 
 function timeToMinutes(timeStr: string): number {
   if (!timeStr) return 0;
@@ -137,12 +67,12 @@ function getUpcomingDates(): { dateStr: string; label: string; dayName: string }
 export default function CandidatePortal() {
   // Auth State
   const [phoneInput, setPhoneInput] = useState('');
-  const [currentClient, setCurrentClient] = useState<DatabaseClient | null>(FALLBACK_CLIENTS[0]);
+  const [currentClient, setCurrentClient] = useState<DatabaseClient | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   // Slots State
-  const [allSlots, setAllSlots] = useState<DatabaseInterviewSlot[]>(INITIAL_COHORT_SLOTS);
+  const [allSlots, setAllSlots] = useState<DatabaseInterviewSlot[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Modal State
@@ -208,23 +138,27 @@ export default function CandidatePortal() {
   // Fetch live client details & slots from Supabase
   const loadPortalData = async () => {
     try {
-      const { data: slotsData } = await supabase
+      const { data: slotsData, error: slotsErr } = await supabase
         .from('interview_slots')
-        .select('*')
+        .select('*, client:clients(*)')
         .order('scheduled_date', { ascending: true });
 
-      if (slotsData && slotsData.length > 0) {
+      if (slotsErr) {
+        console.error('Error loading slots:', slotsErr.message);
+      } else if (slotsData) {
         setAllSlots(slotsData);
       }
 
       if (currentClient?.id) {
-        const { data: clientData } = await supabase
+        const { data: clientData, error: clientErr } = await supabase
           .from('clients')
           .select('*')
           .eq('id', currentClient.id)
           .single();
 
-        if (clientData) {
+        if (clientErr) {
+          console.error('Error refreshing client:', clientErr.message);
+        } else if (clientData) {
           setCurrentClient((prev) => ({
             ...prev,
             ...clientData,
@@ -233,8 +167,8 @@ export default function CandidatePortal() {
           localStorage.setItem('cf_current_client', JSON.stringify(clientData));
         }
       }
-    } catch {
-      // Keep local state
+    } catch (err) {
+      console.error('Network error loading portal data:', err);
     }
   };
 
@@ -343,30 +277,41 @@ export default function CandidatePortal() {
 
     setIsSubmittingSlot(true);
 
-    const newSlotPayload: Omit<DatabaseInterviewSlot, 'id' | 'created_at'> = {
-      client_id: currentClient?.id || 'cli-1',
-      candidate_name: currentClient?.full_name ? `${currentClient.full_name.split(' ')[0]} ${currentClient.full_name.split(' ')[1]?.[0] || ''}.` : 'You',
+    if (!currentClient?.id) {
+      showToast('Please sign in to request an interview slot.');
+      setIsSubmittingSlot(false);
+      return;
+    }
+
+    const noteDetails = [
+      slotForm.jd_text.trim() ? `JD: ${slotForm.jd_text.trim()}` : null,
+      inviteVerified ? '[Verified Invite Screenshot Attached]' : null,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
+    const newSlotPayload = {
+      client_id: currentClient.id,
       company_name: slotForm.company_name.trim(),
       round_type: effectiveRoundType,
       scheduled_date: slotForm.scheduled_date,
       scheduled_time: slotForm.scheduled_time,
-      priority: 'urgent',
-      jd_text: slotForm.jd_text.trim() || null,
-      status: 'requested',
-      invite_verified: inviteVerified,
+      jd_text: noteDetails || null,
+      status: 'requested' as const,
+      round_fee: '0',
     };
 
     try {
       const { data, error } = await supabase
         .from('interview_slots')
         .insert([newSlotPayload])
-        .select();
+        .select('*, client:clients(*)');
 
-      const createdSlot = data && data[0] ? data[0] : {
-        ...newSlotPayload,
-        id: `slot-${Date.now()}`,
-        created_at: new Date().toISOString(),
-      };
+      if (error || !data || !data[0]) {
+        throw new Error(error?.message || 'Failed to submit slot request.');
+      }
+
+      const createdSlot: DatabaseInterviewSlot = data[0];
 
       setAllSlots((prev) => [createdSlot, ...prev]);
 
@@ -374,7 +319,7 @@ export default function CandidatePortal() {
 
       // Trigger official Meta WhatsApp Cloud API alert (non-blocking)
       triggerWhatsAppAlert('client_slot_request', {
-        client_name: currentClient?.full_name || 'Enrolled Client',
+        client_name: currentClient.full_name || 'Enrolled Client',
         company_name: slotForm.company_name.trim(),
         round_type: effectiveRoundType,
         date: slotForm.scheduled_date,
@@ -392,9 +337,9 @@ export default function CandidatePortal() {
         jd_text: '',
       });
       handleRemoveScreenshot();
-    } catch {
-      showToast('Slot submitted. Mentor notified.');
-      setIsRequestModalOpen(false);
+    } catch (err: unknown) {
+      console.error('Error submitting slot request:', err);
+      showToast(err instanceof Error ? err.message : 'Could not submit slot. Please try again.');
     } finally {
       setIsSubmittingSlot(false);
     }
@@ -413,11 +358,15 @@ export default function CandidatePortal() {
     setIsAuthenticating(true);
     setTimeout(async () => {
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from('clients')
           .select('*')
-          .or(`whatsapp_number.ilike.%${clean}%,whatsapp_number.eq.${phoneInput.trim()}`)
+          .or(`whatsapp_number.ilike.%${clean}%,whatsapp_number.eq.${clean},whatsapp_number.eq.${phoneInput.trim()}`)
           .limit(1);
+
+        if (error) {
+          throw new Error(error.message);
+        }
 
         if (data && data.length > 0) {
           const client = data[0];
@@ -428,17 +377,14 @@ export default function CandidatePortal() {
           return;
         }
 
-        const fallback = FALLBACK_CLIENTS.find((c) => c.whatsapp_number.includes(clean)) || FALLBACK_CLIENTS[0];
-        setCurrentClient(fallback);
-        localStorage.setItem('cf_current_client', JSON.stringify(fallback));
-      } catch {
-        const fallback = FALLBACK_CLIENTS[0];
-        setCurrentClient(fallback);
-        localStorage.setItem('cf_current_client', JSON.stringify(fallback));
+        // Real security check: No fake fallback
+        setAuthError('No registered candidate found with this WhatsApp number. Please check the number or contact your onboarding mentor.');
+      } catch (err: unknown) {
+        setAuthError(err instanceof Error ? err.message : 'Login failed. Please verify your connection.');
       } finally {
         setIsAuthenticating(false);
       }
-    }, 300);
+    }, 200);
   };
 
   const handleLogout = () => {
@@ -451,7 +397,7 @@ export default function CandidatePortal() {
     setEditProfileForm({
       full_name: currentClient.full_name || '',
       tech_stack: currentClient.tech_stack || '',
-      current_ctc_lpa: String(currentClient.current_ctc_lpa || '14.0'),
+      current_ctc_lpa: String(currentClient.target_ctc_lpa || currentClient.current_ctc_lpa || '14.0'),
     });
     setIsEditProfileOpen(true);
   };
@@ -461,34 +407,37 @@ export default function CandidatePortal() {
     if (!currentClient?.id || !editProfileForm.full_name.trim()) return;
 
     setIsSavingProfile(true);
+    const cleanCtc = editProfileForm.current_ctc_lpa.trim();
     const updatedClient: DatabaseClient = {
       ...currentClient,
       full_name: editProfileForm.full_name.trim(),
       tech_stack: editProfileForm.tech_stack.trim() || currentClient.tech_stack,
-      current_ctc_lpa: editProfileForm.current_ctc_lpa.trim() || currentClient.current_ctc_lpa,
+      target_ctc_lpa: cleanCtc || currentClient.target_ctc_lpa,
+      current_ctc_lpa: cleanCtc || currentClient.current_ctc_lpa,
     };
 
     try {
-      await supabase
+      const { error } = await supabase
         .from('clients')
         .update({
           full_name: updatedClient.full_name,
           tech_stack: updatedClient.tech_stack,
-          current_ctc_lpa: updatedClient.current_ctc_lpa,
+          target_ctc_lpa: updatedClient.target_ctc_lpa,
         })
         .eq('id', currentClient.id);
+
+      if (error) {
+        throw new Error(error.message);
+      }
 
       setCurrentClient(updatedClient);
       localStorage.setItem('cf_current_client', JSON.stringify(updatedClient));
       broadcastSync('CLIENT_UPDATED', { clientId: currentClient.id });
       showToast('Profile updated successfully!');
       setIsEditProfileOpen(false);
-    } catch {
-      setCurrentClient(updatedClient);
-      localStorage.setItem('cf_current_client', JSON.stringify(updatedClient));
-      broadcastSync('CLIENT_UPDATED', { clientId: currentClient.id });
-      showToast('Profile updated locally.');
-      setIsEditProfileOpen(false);
+    } catch (err: unknown) {
+      console.error('Error updating profile:', err);
+      showToast(err instanceof Error ? err.message : 'Could not save profile changes.');
     } finally {
       setIsSavingProfile(false);
     }
@@ -523,7 +472,7 @@ export default function CandidatePortal() {
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-zinc-300 mb-1.5">
-                  WhatsApp Number
+                  Registered WhatsApp Number
                 </label>
                 <div className="relative">
                   <span className="absolute left-3.5 top-2.5 text-xs font-mono text-zinc-500 font-bold">+91</span>
@@ -531,7 +480,7 @@ export default function CandidatePortal() {
                     type="tel"
                     value={phoneInput}
                     onChange={(e) => setPhoneInput(e.target.value)}
-                    placeholder="9988776655"
+                    placeholder="9999999999"
                     className="w-full bg-black border border-zinc-800 rounded-xl pl-12 pr-4 py-2.5 text-sm font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none transition-all"
                   />
                 </div>
@@ -551,7 +500,7 @@ export default function CandidatePortal() {
                 {isAuthenticating ? (
                   <>
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Signing in...</span>
+                    <span>Verifying...</span>
                   </>
                 ) : (
                   <>
@@ -562,15 +511,8 @@ export default function CandidatePortal() {
               </button>
             </form>
 
-            <div className="pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
-              <span>Demo candidate:</span>
-              <button
-                type="button"
-                onClick={() => setPhoneInput('9988776655')}
-                className="font-mono text-white font-extrabold hover:underline"
-              >
-                9988776655
-              </button>
+            <div className="pt-3 border-t border-zinc-800/80 text-center text-[11px] text-zinc-500 font-medium">
+              Authorized candidate access only
             </div>
           </div>
         </div>
@@ -829,34 +771,46 @@ export default function CandidatePortal() {
           </div>
 
           <div className="bg-[#111113] border border-zinc-800 rounded-2xl p-4">
-            <div className="divide-y divide-zinc-800">
-              {allSlots.map((slot) => {
-                const isMine = slot.client_id === currentClient.id;
-                return (
-                  <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between text-xs">
-                    <div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-extrabold text-white">{slot.company_name}</span>
-                        <span className="text-zinc-400 font-mono text-[11px]">
-                          ({slot.candidate_name || 'Candidate'})
-                        </span>
-                        {isMine && (
-                          <span className="text-[9px] bg-white text-black font-extrabold px-1.5 py-0.2 rounded-full">
-                            You
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-[11px] text-zinc-400">{slot.round_type}</span>
-                    </div>
+            {allSlots.length === 0 ? (
+              <div className="text-center py-4 text-xs text-zinc-500">
+                No active cohort slots scheduled yet.
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-800">
+                {allSlots.map((slot) => {
+                  const isMine = slot.client_id === currentClient.id;
+                  const candName =
+                    slot.candidate_name ||
+                    (slot.client?.full_name
+                      ? `${slot.client.full_name.split(' ')[0]} ${slot.client.full_name.split(' ')[1]?.[0] || ''}.`
+                      : 'Candidate');
 
-                    <div className="text-right font-mono text-[11px] text-zinc-300">
-                      <div>{slot.scheduled_date}</div>
-                      <strong className="text-white">{slot.scheduled_time}</strong>
+                  return (
+                    <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between text-xs">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-extrabold text-white">{slot.company_name}</span>
+                          <span className="text-zinc-400 font-mono text-[11px]">
+                            ({candName})
+                          </span>
+                          {isMine && (
+                            <span className="text-[9px] bg-white text-black font-extrabold px-1.5 py-0.2 rounded-full">
+                              You
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-zinc-400">{slot.round_type}</span>
+                      </div>
+
+                      <div className="text-right font-mono text-[11px] text-zinc-300">
+                        <div>{slot.scheduled_date}</div>
+                        <strong className="text-white">{slot.scheduled_time}</strong>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </section>
       </div>

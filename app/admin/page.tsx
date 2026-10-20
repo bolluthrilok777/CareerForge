@@ -52,95 +52,10 @@ function getUpcomingAdminDates(): { dateStr: string; label: string; dayName: str
   return dates;
 }
 
-// Initial Mock Fallbacks
-const INITIAL_MOCK_LEADS: DatabaseLead[] = [
-  {
-    id: 'lead-1',
-    full_name: 'Rahul Sharma',
-    whatsapp_number: '+919876543210',
-    tech_stack: 'Java Full Stack (Spring Boot / React)',
-    current_ctc_lpa: '14.5',
-    notice_period: '30 Days',
-    willing_to_invest: 'Yes',
-    booking_date: '2026-10-19',
-    booking_time: '03:15 PM IST',
-    status: 'Pending Verification',
-    notes: 'Interested in fintech transition.',
-    created_at: '2026-10-17T06:30:00.000Z',
-  },
-  {
-    id: 'lead-2',
-    full_name: 'Ananya Verma',
-    whatsapp_number: '+919123456789',
-    tech_stack: 'Python / Django / Distributed Systems',
-    current_ctc_lpa: '12.0',
-    notice_period: '15 Days',
-    willing_to_invest: 'Yes',
-    booking_date: '2026-10-20',
-    booking_time: '11:30 AM IST',
-    status: 'Called',
-    notes: 'Available for call tomorrow morning.',
-    created_at: '2026-10-17T03:30:00.000Z',
-  },
-];
-
-const INITIAL_MOCK_CLIENTS: DatabaseClient[] = [
-  {
-    id: 'cli-1',
-    full_name: 'Karthik Raja',
-    whatsapp_number: '+919988776655',
-    tech_stack: 'DevOps / Cloud Architecture (AWS / K8s)',
-    current_ctc_lpa: '18.0',
-    fee_status: 'registration_paid_20k',
-    naukri_status: 'Optimized',
-    linkedin_status: 'Optimized',
-    resume_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-    notes: 'Preparing for Wells Fargo coding round.',
-    created_at: '2026-10-16T08:00:00.000Z',
-  },
-  {
-    id: 'cli-2',
-    full_name: 'Sneha Patel',
-    whatsapp_number: '+919811223344',
-    tech_stack: 'React / Node.js / Full Stack TypeScript',
-    current_ctc_lpa: '12.5',
-    fee_status: 'offer_locked',
-    naukri_status: 'in_progress',
-    linkedin_status: 'in_progress',
-    resume_url: null,
-    notes: 'Offer stage in progress. Next: HR clearance.',
-    created_at: '2026-10-14T08:00:00.000Z',
-  },
-];
-
-const INITIAL_MOCK_SLOTS: DatabaseInterviewSlot[] = [
-  {
-    id: 'slot-1',
-    client_id: 'cli-1',
-    candidate_name: 'Karthik Raja',
-    company_name: 'Wells Fargo',
-    round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '02:30 PM IST',
-    priority: 'urgent',
-    jd_text: 'Core Java, Multithreading, ConcurrentHashMap, Spring Cloud Gateway.',
-    status: 'approved',
-    invite_verified: true,
-  },
-  {
-    id: 'slot-2',
-    client_id: 'cli-2',
-    candidate_name: 'Sneha Patel',
-    company_name: 'PhonePe',
-    round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '04:00 PM IST',
-    priority: 'standard',
-    jd_text: 'Senior Frontend Engineer. Custom hooks, state machines.',
-    status: 'approved',
-    invite_verified: true,
-  },
-];
+// Initial Empty States for Production
+const INITIAL_MOCK_LEADS: DatabaseLead[] = [];
+const INITIAL_MOCK_CLIENTS: DatabaseClient[] = [];
+const INITIAL_MOCK_SLOTS: DatabaseInterviewSlot[] = [];
 
 function timeToMinutes(timeStr: string): number {
   if (!timeStr) return 0;
@@ -234,20 +149,28 @@ export default function MobileAdminCommandCenter() {
       const [leadsRes, clientsRes, slotsRes] = await Promise.all([
         supabase.from('candidate_leads').select('*').order('created_at', { ascending: false }),
         supabase.from('clients').select('*').order('created_at', { ascending: false }),
-        supabase.from('interview_slots').select('*').order('scheduled_date', { ascending: true }),
+        supabase.from('interview_slots').select('*, client:clients(*)').order('scheduled_date', { ascending: true }),
       ]);
 
-      if (leadsRes.data && leadsRes.data.length > 0) {
+      if (leadsRes.error) {
+        console.error('Error fetching leads:', leadsRes.error.message);
+      } else if (leadsRes.data) {
         setLeads(leadsRes.data);
       }
-      if (clientsRes.data && clientsRes.data.length > 0) {
+
+      if (clientsRes.error) {
+        console.error('Error fetching clients:', clientsRes.error.message);
+      } else if (clientsRes.data) {
         setClients(clientsRes.data);
       }
-      if (slotsRes.data && slotsRes.data.length > 0) {
+
+      if (slotsRes.error) {
+        console.error('Error fetching slots:', slotsRes.error.message);
+      } else if (slotsRes.data) {
         setSlots(slotsRes.data);
       }
-    } catch {
-      // Offline fallback
+    } catch (err) {
+      console.error('Network error fetching admin data:', err);
     }
   };
 
@@ -290,8 +213,10 @@ export default function MobileAdminCommandCenter() {
   // Convert Lead -> Client
   const handleConvertLead = async (lead: DatabaseLead) => {
     try {
-      const cleanPhone = lead.whatsapp_number.trim();
-      const existingClient = clients.find((c) => c.whatsapp_number === cleanPhone);
+      const cleanPhone = lead.whatsapp_number.trim().replace(/\D/g, '');
+      const existingClient = clients.find(
+        (c) => c.whatsapp_number.replace(/\D/g, '') === cleanPhone
+      );
 
       let createdClient: DatabaseClient;
 
@@ -302,12 +227,12 @@ export default function MobileAdminCommandCenter() {
           full_name: lead.full_name,
           whatsapp_number: cleanPhone,
           tech_stack: lead.tech_stack,
-          current_ctc_lpa: lead.current_ctc_lpa || '12.0',
+          target_ctc_lpa: String(lead.current_ctc_lpa || '12.0').replace(/\s*LPA/i, ''),
           fee_status: 'registration_paid_20k' as const,
           naukri_status: 'in_progress',
           linkedin_status: 'in_progress',
-          resume_url: null,
-          lead_id: lead.id,
+          client_type: 'full_package',
+          lead_id: lead.id || null,
           notes: lead.notes || 'Converted from Lead.',
         };
 
@@ -316,13 +241,11 @@ export default function MobileAdminCommandCenter() {
           .insert([clientPayload])
           .select();
 
-        if (clientError) throw clientError;
+        if (clientError || !insertedClient || !insertedClient[0]) {
+          throw new Error(clientError?.message || 'Failed to create candidate record.');
+        }
 
-        createdClient = (insertedClient && insertedClient[0]) || {
-          ...clientPayload,
-          id: `cli-${Date.now()}`,
-          created_at: new Date().toISOString(),
-        };
+        createdClient = insertedClient[0];
       }
 
       if (lead.id) {
@@ -339,25 +262,9 @@ export default function MobileAdminCommandCenter() {
 
       showToast(`🎉 ${lead.full_name} converted to Enrolled Candidate!`);
       setActiveTab('clients');
-    } catch {
-      setLeads((prev) => prev.filter((l) => l.id !== lead.id));
-      const localClient: DatabaseClient = {
-        id: `cli-${Date.now()}`,
-        full_name: lead.full_name,
-        whatsapp_number: lead.whatsapp_number,
-        tech_stack: lead.tech_stack,
-        current_ctc_lpa: lead.current_ctc_lpa || '12.0',
-        fee_status: 'registration_paid_20k',
-        naukri_status: 'in_progress',
-        linkedin_status: 'in_progress',
-        resume_url: null,
-        lead_id: lead.id,
-        notes: lead.notes,
-        created_at: new Date().toISOString(),
-      };
-      setClients((prev) => [localClient, ...prev]);
-      showToast(`${lead.full_name} converted.`);
-      setActiveTab('clients');
+    } catch (err: unknown) {
+      console.error('Error converting lead:', err);
+      showToast(err instanceof Error ? err.message : 'Could not convert lead.');
     }
   };
 
@@ -736,7 +643,7 @@ export default function MobileAdminCommandCenter() {
           full_name: emergencyForm.candidate_name.trim(),
           whatsapp_number: cleanPhone,
           tech_stack: `${effectiveRoundType} (Emergency Support)`,
-          current_ctc_lpa: '14.0',
+          target_ctc_lpa: '14.0',
           fee_status: 'offer_locked' as const,
           naukri_status: 'in_progress',
           linkedin_status: 'in_progress',
@@ -749,40 +656,34 @@ export default function MobileAdminCommandCenter() {
           .insert([clientPayload])
           .select();
 
-        if (clientErr) throw clientErr;
+        if (clientErr || !insertedClient || !insertedClient[0]) {
+          throw new Error(clientErr?.message || 'Failed to create client for emergency booking.');
+        }
 
-        createdClient = (insertedClient && insertedClient[0]) || {
-          ...clientPayload,
-          id: clientId,
-          created_at: new Date().toISOString(),
-        };
+        createdClient = insertedClient[0];
+        clientId = createdClient.id;
       }
 
-      const slotPayload: Omit<DatabaseInterviewSlot, 'id' | 'created_at'> = {
+      const slotPayload = {
         client_id: clientId,
-        candidate_name: emergencyForm.candidate_name.trim(),
         company_name: emergencyForm.company_name.trim(),
         round_type: effectiveRoundType,
         scheduled_date: emergencyForm.scheduled_date,
         scheduled_time: emergencyForm.scheduled_time,
-        priority: 'urgent',
-        status: 'approved',
+        status: 'approved' as const,
         round_fee: emergencyForm.round_fee,
-        invite_verified: true,
       };
 
       const { data: insertedSlot, error: slotErr } = await supabase
         .from('interview_slots')
         .insert([slotPayload])
-        .select();
+        .select('*, client:clients(*)');
 
-      if (slotErr) throw slotErr;
+      if (slotErr || !insertedSlot || !insertedSlot[0]) {
+        throw new Error(slotErr?.message || 'Failed to reserve emergency slot.');
+      }
 
-      const createdSlot = (insertedSlot && insertedSlot[0]) || {
-        ...slotPayload,
-        id: `slot-${Date.now()}`,
-        created_at: new Date().toISOString(),
-      };
+      const createdSlot: DatabaseInterviewSlot = insertedSlot[0];
 
       setClients((prev) => [createdClient, ...prev.filter((c) => c.id !== createdClient.id)]);
       setSlots((prev) => [createdSlot, ...prev]);
@@ -814,41 +715,9 @@ export default function MobileAdminCommandCenter() {
       });
       setIsEmergencyCustomRound(false);
       setEmergencyCustomRoundText('');
-    } catch {
-      // Offline fallback
-      const fallbackClient: DatabaseClient = {
-        id: `cli-${Date.now()}`,
-        full_name: emergencyForm.candidate_name.trim(),
-        whatsapp_number: cleanPhone,
-        tech_stack: `${effectiveRoundType} (Emergency Support)`,
-        current_ctc_lpa: '14.0',
-        fee_status: 'offer_locked',
-        naukri_status: 'in_progress',
-        linkedin_status: 'in_progress',
-        client_type: 'per_round',
-        notes: `Agreed Round Fee: ${emergencyForm.round_fee}`,
-        created_at: new Date().toISOString(),
-      };
-
-      const fallbackSlot: DatabaseInterviewSlot = {
-        id: `slot-${Date.now()}`,
-        client_id: fallbackClient.id,
-        candidate_name: emergencyForm.candidate_name.trim(),
-        company_name: emergencyForm.company_name.trim(),
-        round_type: effectiveRoundType,
-        scheduled_date: emergencyForm.scheduled_date,
-        scheduled_time: emergencyForm.scheduled_time,
-        priority: 'urgent',
-        status: 'approved',
-        round_fee: emergencyForm.round_fee,
-        invite_verified: true,
-        created_at: new Date().toISOString(),
-      };
-
-      setClients((prev) => [fallbackClient, ...prev]);
-      setSlots((prev) => [fallbackSlot, ...prev]);
-      broadcastSync('SLOT_CREATED', fallbackSlot);
-      showToast(`⚡ Emergency slot approved (local sync)`);
+    } catch (err: unknown) {
+      console.error('Emergency submit error:', err);
+      showToast(err instanceof Error ? err.message : 'Could not process emergency booking.');
       setIsEmergencyModalOpen(false);
     } finally {
       setIsSubmittingEmergency(false);
@@ -862,7 +731,7 @@ export default function MobileAdminCommandCenter() {
       full_name: client.full_name || '',
       whatsapp_number: client.whatsapp_number || '',
       tech_stack: client.tech_stack || '',
-      current_ctc_lpa: String(client.current_ctc_lpa || '14.0'),
+      current_ctc_lpa: String(client.target_ctc_lpa || client.current_ctc_lpa || '14.0'),
       client_type: client.client_type || 'full_package',
       fee_status: client.fee_status || 'registration_paid_20k',
       naukri_status: client.naukri_status || client.profiles_status || 'in_progress',
@@ -880,12 +749,14 @@ export default function MobileAdminCommandCenter() {
     }
 
     setIsSavingClientEdit(true);
+    const cleanCtc = editClientForm.current_ctc_lpa.trim();
     const updatedClient: DatabaseClient = {
       ...editingClientModal,
       full_name: editClientForm.full_name.trim(),
-      whatsapp_number: editClientForm.whatsapp_number.trim(),
+      whatsapp_number: editClientForm.whatsapp_number.trim().replace(/\D/g, ''),
       tech_stack: editClientForm.tech_stack.trim() || 'Software Engineer',
-      current_ctc_lpa: editClientForm.current_ctc_lpa.trim() || '14.0',
+      target_ctc_lpa: cleanCtc || '14.0',
+      current_ctc_lpa: cleanCtc || '14.0',
       client_type: editClientForm.client_type,
       fee_status: editClientForm.fee_status as DatabaseClient['fee_status'],
       naukri_status: editClientForm.naukri_status,
@@ -895,13 +766,13 @@ export default function MobileAdminCommandCenter() {
     };
 
     try {
-      await supabase
+      const { error } = await supabase
         .from('clients')
         .update({
           full_name: updatedClient.full_name,
           whatsapp_number: updatedClient.whatsapp_number,
           tech_stack: updatedClient.tech_stack,
-          current_ctc_lpa: updatedClient.current_ctc_lpa,
+          target_ctc_lpa: updatedClient.target_ctc_lpa,
           client_type: updatedClient.client_type,
           fee_status: updatedClient.fee_status,
           naukri_status: updatedClient.naukri_status,
@@ -910,20 +781,8 @@ export default function MobileAdminCommandCenter() {
         })
         .eq('id', editingClientModal.id);
 
-      // If name was updated, synchronize candidate name across their interview slots
-      if (updatedClient.full_name !== editingClientModal.full_name) {
-        await supabase
-          .from('interview_slots')
-          .update({ candidate_name: updatedClient.full_name })
-          .eq('client_id', editingClientModal.id);
-
-        setSlots((prev) =>
-          prev.map((s) =>
-            s.client_id === editingClientModal.id
-              ? { ...s, candidate_name: updatedClient.full_name }
-              : s
-          )
-        );
+      if (error) {
+        throw new Error(error.message);
       }
 
       setClients((prev) =>
@@ -932,12 +791,9 @@ export default function MobileAdminCommandCenter() {
       broadcastSync('CLIENT_UPDATED', { clientId: editingClientModal.id });
       showToast(`Master update saved for ${updatedClient.full_name}`);
       setEditingClientModal(null);
-    } catch {
-      setClients((prev) =>
-        prev.map((c) => (c.id === editingClientModal.id ? updatedClient : c))
-      );
-      showToast('Master update saved locally.');
-      setEditingClientModal(null);
+    } catch (err: unknown) {
+      console.error('Error saving client update:', err);
+      showToast(err instanceof Error ? err.message : 'Could not save candidate update.');
     } finally {
       setIsSavingClientEdit(false);
     }
@@ -1008,7 +864,7 @@ export default function MobileAdminCommandCenter() {
                 maxLength={6}
                 value={adminPinInput}
                 onChange={(e) => setAdminPinInput(e.target.value)}
-                placeholder="PIN: 8899"
+                placeholder="Enter 4-digit PIN"
                 className="w-full bg-black border border-zinc-800 rounded-xl px-4 py-3 text-center text-lg font-mono tracking-widest text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none transition-all"
               />
 
@@ -1027,13 +883,9 @@ export default function MobileAdminCommandCenter() {
             </form>
 
             <div className="pt-3 border-t border-zinc-800/80 text-center">
-              <button
-                type="button"
-                onClick={() => setAdminPinInput('8899')}
-                className="text-[11px] text-zinc-500 hover:text-white font-mono transition-colors"
-              >
-                Auto-fill Master PIN: 8899
-              </button>
+              <span className="text-[11px] text-zinc-500 font-medium">
+                Authorized team members only
+              </span>
             </div>
           </div>
         </div>
@@ -1257,14 +1109,17 @@ export default function MobileAdminCommandCenter() {
 
                         <div className="divide-y divide-zinc-800">
                           {dateSlots.map((slot) => {
-                            const client = clients.find((c) => c.id === slot.client_id);
+                            const client = clients.find((c) => c.id === slot.client_id) || slot.client;
                             const candName = slot.candidate_name || client?.full_name || 'Candidate';
-                            const isEmergency = client?.client_type === 'per_round' || Boolean(slot.round_fee);
-                            const feeDisplay = slot.round_fee
-                              ? (typeof slot.round_fee === 'string' && slot.round_fee.startsWith('₹')
-                                  ? slot.round_fee
-                                  : `₹${slot.round_fee}`)
-                              : '₹3,000';
+                            const isEmergency =
+                              client?.client_type === 'per_round' ||
+                              (Boolean(slot.round_fee) && slot.round_fee !== '0' && slot.round_fee !== 0);
+                            const feeDisplay =
+                              slot.round_fee && slot.round_fee !== '0' && slot.round_fee !== 0
+                                ? (typeof slot.round_fee === 'string' && slot.round_fee.startsWith('₹')
+                                    ? slot.round_fee
+                                    : `₹${slot.round_fee}`)
+                                : '₹3,000';
 
                             return (
                               <div key={slot.id} className="py-2.5 first:pt-0 last:pb-0">

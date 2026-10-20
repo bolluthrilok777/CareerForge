@@ -72,18 +72,23 @@ export default function InstantEmergencyBookingPage() {
   // Fetch all active booked slots to calculate collisions in real-time
   const fetchActiveSlots = async () => {
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('interview_slots')
-        .select('*')
+        .select('*, client:clients(*)')
         .neq('status', 'cancelled')
         .neq('status', 'declined')
         .order('scheduled_date', { ascending: true });
 
-      if (data && data.length > 0) {
+      if (error) {
+        console.error('Error fetching slots:', error.message);
+        return;
+      }
+
+      if (data) {
         setExistingSlots(data);
       }
-    } catch {
-      // Offline fallback
+    } catch (err) {
+      console.error('Network error fetching slots:', err);
     }
   };
 
@@ -183,68 +188,80 @@ export default function InstantEmergencyBookingPage() {
     setIsSubmitting(true);
 
     try {
-      // 1. Find or create client with client_type: 'per_round'
-      let clientId = `cli-${Date.now()}`;
+      // 1. Find or create client with client_type: 'per_round' in Supabase
+      let clientId: string = '';
 
-      try {
-        const { data: existingClient } = await supabase
-          .from('clients')
-          .select('id')
-          .eq('whatsapp_number', cleanPhone)
-          .limit(1);
+      const { data: existingClients, error: clientFindErr } = await supabase
+        .from('clients')
+        .select('*')
+        .or(`whatsapp_number.ilike.%${cleanPhone}%,whatsapp_number.eq.${cleanPhone}`)
+        .limit(1);
 
-        if (existingClient && existingClient.length > 0) {
-          clientId = existingClient[0].id;
-        } else {
-          const newClientPayload = {
-            full_name: fullName.trim(),
-            whatsapp_number: cleanPhone,
-            tech_stack: `${effectiveRoundType} (Emergency Clearance)`,
-            fee_status: 'offer_locked' as const,
-            client_type: 'per_round',
-            notes: `Urgent single-round booking for ${companyName.trim()}`,
-          };
-
-          const { data: insertedClient } = await supabase
-            .from('clients')
-            .insert([newClientPayload])
-            .select();
-
-          if (insertedClient && insertedClient[0]) {
-            clientId = insertedClient[0].id;
-          }
-        }
-      } catch {
-        // Continue with local ID if network fails
+      if (clientFindErr) {
+        throw new Error(`Database check error: ${clientFindErr.message}`);
       }
 
-      // 2. Insert interview slot with status 'requested'
-      const newSlotPayload: Omit<DatabaseInterviewSlot, 'id' | 'created_at'> = {
+      if (existingClients && existingClients.length > 0) {
+        clientId = existingClients[0].id;
+        // Ensure client is tagged as per_round
+        await supabase
+          .from('clients')
+          .update({ client_type: 'per_round' })
+          .eq('id', clientId);
+      } else {
+        const newClientPayload = {
+          full_name: fullName.trim(),
+          whatsapp_number: cleanPhone,
+          tech_stack: `${effectiveRoundType} (Emergency Clearance)`,
+          target_ctc_lpa: 'Not Disclosed',
+          fee_status: 'offer_locked' as const,
+          naukri_status: 'in_progress',
+          linkedin_status: 'in_progress',
+          client_type: 'per_round',
+          notes: `Urgent single-round booking for ${companyName.trim()}`,
+        };
+
+        const { data: insertedClient, error: clientInsertErr } = await supabase
+          .from('clients')
+          .insert([newClientPayload])
+          .select();
+
+        if (clientInsertErr || !insertedClient || !insertedClient[0]) {
+          throw new Error(clientInsertErr?.message || 'Failed to create candidate profile.');
+        }
+
+        clientId = insertedClient[0].id;
+      }
+
+      // 2. Insert interview slot using strictly verified table schema
+      const noteDetails = [
+        jdNotes.trim() ? `JD: ${jdNotes.trim()}` : null,
+        inviteVerified ? '[Verified Invite Screenshot Verified]' : null,
+      ]
+        .filter(Boolean)
+        .join(' | ');
+
+      const newSlotPayload = {
         client_id: clientId,
-        candidate_name: fullName.trim(),
         company_name: companyName.trim(),
         round_type: effectiveRoundType,
         scheduled_date: selectedDate,
         scheduled_time: selectedTime,
-        priority: 'urgent',
-        jd_text: jdNotes.trim() || null,
-        status: 'requested',
+        jd_text: noteDetails || null,
+        status: 'requested' as const,
         round_fee: 'Emergency Round',
-        invite_verified: inviteVerified,
       };
 
-      const { data: insertedSlot, error: slotError } = await supabase
+      const { data: insertedSlots, error: slotError } = await supabase
         .from('interview_slots')
         .insert([newSlotPayload])
-        .select();
+        .select('*, client:clients(*)');
 
-      if (slotError) throw slotError;
+      if (slotError || !insertedSlots || !insertedSlots[0]) {
+        throw new Error(slotError?.message || 'Failed to reserve interview slot in database.');
+      }
 
-      const createdSlot = (insertedSlot && insertedSlot[0]) || {
-        ...newSlotPayload,
-        id: `slot-${Date.now()}`,
-        created_at: new Date().toISOString(),
-      };
+      const createdSlot: DatabaseInterviewSlot = insertedSlots[0];
 
       setExistingSlots((prev) => [createdSlot, ...prev]);
       broadcastSync('SLOT_CREATED', createdSlot);
@@ -260,25 +277,10 @@ export default function InstantEmergencyBookingPage() {
         date: selectedDate,
         time: selectedTime,
       });
-    } catch {
-      // Fallback local display
-      const fallbackSlot: DatabaseInterviewSlot = {
-        id: `slot-${Date.now()}`,
-        client_id: 'cli-emergency',
-        candidate_name: fullName.trim(),
-        company_name: companyName.trim(),
-        round_type: effectiveRoundType,
-        scheduled_date: selectedDate,
-        scheduled_time: selectedTime,
-        priority: 'urgent',
-        jd_text: jdNotes.trim() || null,
-        status: 'requested',
-        round_fee: 'Emergency Round',
-        invite_verified: inviteVerified,
-      };
-      setExistingSlots((prev) => [fallbackSlot, ...prev]);
-      broadcastSync('SLOT_CREATED', fallbackSlot);
-      setBookedSuccess(fallbackSlot);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Booking failed. Please try again.';
+      console.error('Instant emergency booking error:', err);
+      setErrorMessage(errMsg);
     } finally {
       setIsSubmitting(false);
     }
