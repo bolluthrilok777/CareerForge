@@ -2,7 +2,7 @@
  * Client-side non-blocking trigger for Meta WhatsApp Cloud API notifications
  */
 export function triggerWhatsAppAlert(
-  type: 'new_lead' | 'emergency_booking' | 'client_slot_request',
+  type: 'new_lead' | 'emergency_booking' | 'client_slot_request' | 'client_slot_rescheduled',
   data: Record<string, any>
 ) {
   try {

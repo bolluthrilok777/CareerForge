@@ -68,6 +68,19 @@ export async function POST(request: Request) {
 *Client:* ${clientName}
 *Company:* ${company} - ${round}
 *Slot:* ${date} at ${time}`;
+    } else if (type === 'client_slot_rescheduled') {
+      const clientName = data.client_name || data.candidate_name || data.name || 'Enrolled Candidate';
+      const company = data.company_name || 'Interview';
+      const round = data.round_type || 'Interview Round';
+      const date = data.date || data.scheduled_date || 'TBD';
+      const time = data.time || data.scheduled_time || 'TBD';
+
+      messageText = `🔄 *INTERVIEW SLOT RESCHEDULED!*
+*Candidate:* ${clientName}
+*Company:* ${company} - ${round}
+*New Slot:* ${date} at ${time}
+*Status:* Pending Admin Approval
+👉 Review in Admin Center: /admin`;
     } else if (data.message || data.body || payload.message || payload.body) {
       messageText = data.message || data.body || payload.message || payload.body;
     } else {

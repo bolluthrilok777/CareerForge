@@ -127,6 +127,26 @@ export default function MobileAdminCommandCenter() {
   });
   const [isSavingClientEdit, setIsSavingClientEdit] = useState(false);
 
+  // Edit Interview Slot Modal State (Admin Master Control)
+  const [editingSlotModal, setEditingSlotModal] = useState<DatabaseInterviewSlot | null>(null);
+  const [editSlotForm, setEditSlotForm] = useState({
+    company_name: '',
+    round_type: 'Technical Coding L1',
+    scheduled_date: '2026-10-21',
+    scheduled_time: '02:30 PM IST',
+    meeting_link: '',
+    status: 'requested' as DatabaseInterviewSlot['status'],
+    round_fee: '',
+    jd_text: '',
+  });
+  const [isEditSlotCustomRound, setIsEditSlotCustomRound] = useState(false);
+  const [editSlotCustomRoundText, setEditSlotCustomRoundText] = useState('');
+  const [isSavingSlotEdit, setIsSavingSlotEdit] = useState(false);
+  const [editSlotError, setEditSlotError] = useState<string | null>(null);
+
+  // Leads Filter State
+  const [leadFilter, setLeadFilter] = useState<'all' | 'active' | 'converted'>('all');
+
   // Restore auth
   useEffect(() => {
     try {
@@ -255,13 +275,15 @@ export default function MobileAdminCommandCenter() {
           .eq('id', lead.id);
       }
 
-      setLeads((prev) => prev.filter((l) => l.id !== lead.id));
+      // Keep lead in list with Converted status so it never disappears
+      setLeads((prev) =>
+        prev.map((l) => (l.id === lead.id ? { ...l, status: 'Converted' } : l))
+      );
       setClients((prev) => [createdClient, ...prev.filter((c) => c.id !== createdClient.id)]);
 
       broadcastSync('LEAD_CONVERTED', { leadId: lead.id, client: createdClient });
 
-      showToast(`🎉 ${lead.full_name} converted to Enrolled Candidate!`);
-      setActiveTab('clients');
+      showToast(`🎉 ${lead.full_name} enrolled as Candidate! Lead marked Converted.`);
     } catch (err: unknown) {
       console.error('Error converting lead:', err);
       showToast(err instanceof Error ? err.message : 'Could not convert lead.');
@@ -269,6 +291,12 @@ export default function MobileAdminCommandCenter() {
   };
 
   const handleUpdateLeadStatus = async (leadId: string, newStatus: string) => {
+    const targetLead = leads.find((l) => l.id === leadId);
+    if (newStatus === 'Converted' && targetLead) {
+      await handleConvertLead(targetLead);
+      return;
+    }
+
     try {
       await supabase
         .from('candidate_leads')
@@ -587,6 +615,96 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
+  // Open Edit Slot Modal (Admin Power)
+  const handleOpenEditSlotModal = (slot: DatabaseInterviewSlot) => {
+    const standardRounds = [
+      'Technical Coding L1',
+      'System Design L2',
+      'Screening Round',
+      'Hiring Manager L3',
+      'HR Discussion',
+    ];
+    const isCustom = !standardRounds.includes(slot.round_type);
+    setIsEditSlotCustomRound(isCustom);
+    setEditSlotCustomRoundText(isCustom ? slot.round_type : '');
+    setEditSlotForm({
+      company_name: slot.company_name || '',
+      round_type: isCustom ? 'Custom' : slot.round_type,
+      scheduled_date: slot.scheduled_date || '2026-10-21',
+      scheduled_time: slot.scheduled_time || '02:30 PM IST',
+      meeting_link: slot.meeting_link || '',
+      status: slot.status || 'requested',
+      round_fee: slot.round_fee ? String(slot.round_fee) : '',
+      jd_text: slot.jd_text || '',
+    });
+    setEditSlotError(null);
+    setEditingSlotModal(slot);
+  };
+
+  // Save Edit Slot (Admin Power)
+  const handleSaveSlotEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingSlotModal) return;
+    setEditSlotError(null);
+
+    const effectiveRoundType = isEditSlotCustomRound
+      ? editSlotCustomRoundText.trim()
+      : editSlotForm.round_type;
+
+    if (isEditSlotCustomRound && !editSlotCustomRoundText.trim()) {
+      setEditSlotError('Please enter the custom round type name.');
+      return;
+    }
+
+    // Collision check excluding this slot
+    const collision = checkSlotCollision(
+      editSlotForm.scheduled_time,
+      editSlotForm.scheduled_date,
+      slots,
+      editingSlotModal.id
+    );
+    if (collision.isClash) {
+      setEditSlotError(collision.message || 'Time slot clash detected. Mentors must not be double-booked.');
+      return;
+    }
+
+    setIsSavingSlotEdit(true);
+    try {
+      const updatePayload = {
+        company_name: editSlotForm.company_name.trim(),
+        round_type: effectiveRoundType,
+        scheduled_date: editSlotForm.scheduled_date,
+        scheduled_time: editSlotForm.scheduled_time,
+        meeting_link: editSlotForm.meeting_link.trim() || null,
+        status: editSlotForm.status,
+        round_fee: editSlotForm.round_fee.trim() || null,
+        jd_text: editSlotForm.jd_text.trim() || null,
+      };
+
+      const { data, error } = await supabase
+        .from('interview_slots')
+        .update(updatePayload)
+        .eq('id', editingSlotModal.id)
+        .select('*, client:clients(*)');
+
+      if (error) throw new Error(error.message);
+
+      const updatedSlot = data && data[0] ? data[0] : { ...editingSlotModal, ...updatePayload };
+
+      setSlots((prev) =>
+        prev.map((s) => (s.id === editingSlotModal.id ? updatedSlot : s))
+      );
+      broadcastSync('SLOT_UPDATED', { slotId: editingSlotModal.id, ...updatePayload });
+      showToast('Interview slot updated successfully!');
+      setEditingSlotModal(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to update interview slot.';
+      setEditSlotError(msg);
+    } finally {
+      setIsSavingSlotEdit(false);
+    }
+  };
+
   // Emergency / Per-Round Booking Submission
   const handleEmergencySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -808,6 +926,12 @@ export default function MobileAdminCommandCenter() {
   const offerLockedCount = clients.filter((c) => c.fee_status === 'offer_locked' || c.fee_status === 'final_12_percent_paid').length;
 
   const activeLeads = leads.filter((l) => l.status !== 'Converted');
+  const convertedLeads = leads.filter((l) => l.status === 'Converted');
+  const displayedLeads = leads.filter((l) => {
+    if (leadFilter === 'active') return l.status !== 'Converted';
+    if (leadFilter === 'converted') return l.status === 'Converted';
+    return true;
+  });
 
   // Group slots by date
   const slotsGroupedByDate = slots.reduce<Record<string, DatabaseInterviewSlot[]>>((acc, slot) => {
@@ -1055,7 +1179,7 @@ export default function MobileAdminCommandCenter() {
             <span className={`font-mono text-[10px] px-1 rounded ${
               activeTab === 'leads' ? 'bg-zinc-200 text-black' : 'bg-zinc-800 text-zinc-400'
             }`}>
-              {activeLeads.length}
+              {leads.length}
             </span>
           </button>
         </div>
@@ -1162,27 +1286,40 @@ export default function MobileAdminCommandCenter() {
                                   </div>
 
                                   <div className="text-right shrink-0 space-y-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCycleSlotStatus(slot.id)}
-                                      className={`block ml-auto text-[10px] uppercase font-bold px-2 py-0.5 rounded transition-colors ${
-                                        slot.status === 'approved'
-                                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                                          : slot.status === 'rescheduled'
-                                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                                          : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
-                                      }`}
-                                    >
-                                      {slot.status} ↺
-                                    </button>
+                                    <div className="flex items-center justify-end gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenEditSlotModal(slot)}
+                                        title="Edit Interview Slot Details"
+                                        className="p-1 rounded bg-zinc-900 text-zinc-300 hover:text-white border border-zinc-800 text-[10px] font-bold flex items-center gap-1 transition-colors hover:border-zinc-700"
+                                      >
+                                        <Edit3 className="w-3 h-3 text-zinc-400" />
+                                        <span>Edit</span>
+                                      </button>
 
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteSlot(slot.id)}
-                                      className="p-1 text-zinc-500 hover:text-red-400"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCycleSlotStatus(slot.id)}
+                                        className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded transition-colors ${
+                                          slot.status === 'approved'
+                                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                                            : slot.status === 'rescheduled'
+                                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                                            : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                                        }`}
+                                      >
+                                        {slot.status} ↺
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteSlot(slot.id)}
+                                        className="p-1 text-zinc-500 hover:text-red-400"
+                                        title="Delete Slot"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
                               </div>
@@ -1381,46 +1518,111 @@ export default function MobileAdminCommandCenter() {
         {activeTab === 'leads' && (
           <div className="space-y-3">
             <div className="bg-[#111113] border border-zinc-800 rounded-2xl p-4 space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80">
-                <h2 className="text-xs font-extrabold uppercase tracking-wider text-white">
-                  Active Leads ({activeLeads.length})
-                </h2>
-                <span className="text-[11px] text-zinc-400 font-mono">
-                  Inflow Pipeline
-                </span>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 border-b border-zinc-800/80 gap-2">
+                <div>
+                  <h2 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                    Candidate Leads Pipeline
+                  </h2>
+                  <p className="text-[11px] text-zinc-400">
+                    Strategy calls, incoming inquiries, and conversion status
+                  </p>
+                </div>
+
+                {/* Filter Pills */}
+                <div className="flex items-center bg-black border border-zinc-800 p-1 rounded-xl gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setLeadFilter('all')}
+                    className={`px-2.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                      leadFilter === 'all'
+                        ? 'bg-white text-black shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    All ({leads.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLeadFilter('active')}
+                    className={`px-2.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                      leadFilter === 'active'
+                        ? 'bg-white text-black shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    Active ({activeLeads.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLeadFilter('converted')}
+                    className={`px-2.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                      leadFilter === 'converted'
+                        ? 'bg-emerald-400 text-black font-extrabold shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    Converted ({convertedLeads.length})
+                  </button>
+                </div>
               </div>
 
-              {activeLeads.length === 0 ? (
+              {displayedLeads.length === 0 ? (
                 <div className="text-center py-6 text-xs text-zinc-400">
-                  No active unconverted leads.
+                  {leadFilter === 'converted'
+                    ? 'No converted leads yet. Select "Converted" from dropdown or tap "Convert & Enroll".'
+                    : leadFilter === 'active'
+                    ? 'No active unconverted leads.'
+                    : 'No candidate leads registered yet.'}
                 </div>
               ) : (
                 <div className="divide-y divide-zinc-800">
-                  {activeLeads.map((l) => (
+                  {displayedLeads.map((l) => (
                     <div key={l.id} className="py-3 first:pt-0 last:pb-0 space-y-1.5">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <strong className="text-xs font-extrabold text-white block">
-                            {l.full_name}
-                          </strong>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <strong className="text-xs font-extrabold text-white">
+                              {l.full_name}
+                            </strong>
+                            {l.status === 'Converted' && (
+                              <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30">
+                                ✓ Enrolled Candidate
+                              </span>
+                            )}
+                          </div>
                           <span className="text-[11px] text-zinc-400 block">{l.tech_stack}</span>
                           <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-300 font-mono">
                             <span>CTC: {l.current_ctc_lpa} LPA</span>
                             <span>•</span>
                             <span>Notice: {l.notice_period}</span>
+                            <span>•</span>
+                            <span className="text-zinc-400">{l.whatsapp_number}</span>
                           </div>
                         </div>
 
                         <div className="text-right shrink-0 space-y-1.5">
-                          {/* 1-Click Convert & Enroll Button */}
-                          <button
-                            type="button"
-                            onClick={() => handleConvertLead(l)}
-                            className="inline-flex items-center gap-1 text-[11px] font-extrabold text-black bg-white hover:bg-zinc-200 px-3 py-1 rounded-lg transition-colors shadow-sm"
-                          >
-                            <UserPlus className="w-3 h-3 text-black" />
-                            <span>Convert & Enroll</span>
-                          </button>
+                          {/* 1-Click Convert or Converted Indicator */}
+                          {l.status === 'Converted' ? (
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setActiveTab('clients')}
+                                className="inline-flex items-center gap-1 text-[10px] font-bold text-white bg-zinc-900 hover:bg-zinc-800 px-2.5 py-1 rounded-lg border border-zinc-700 transition-colors shadow-sm"
+                              >
+                                <span>View in Candidates</span>
+                                <ArrowRight className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleConvertLead(l)}
+                              className="inline-flex items-center gap-1 text-[11px] font-extrabold text-black bg-white hover:bg-zinc-200 px-3 py-1 rounded-lg transition-colors shadow-sm"
+                            >
+                              <UserPlus className="w-3 h-3 text-black" />
+                              <span>Convert & Enroll</span>
+                            </button>
+                          )}
 
                           <div className="flex items-center justify-end gap-1.5">
                             {/* Note button */}
@@ -2076,6 +2278,240 @@ export default function MobileAdminCommandCenter() {
                   className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors"
                 >
                   {isSavingClientEdit ? 'Saving Master...' : 'Save Master Details'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL: EDIT INTERVIEW SLOT (ADMIN MASTER POWER)          */}
+      {/* ======================================================== */}
+      {editingSlotModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#121214] rounded-3xl max-w-md w-full p-6 border border-zinc-800 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto text-white">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div>
+                <h3 className="text-sm font-extrabold text-white flex items-center gap-1.5">
+                  <Edit3 className="w-4 h-4 text-emerald-400" />
+                  <span>Edit Interview Slot</span>
+                </h3>
+                <p className="text-xs text-zinc-400">
+                  Candidate: {editingSlotModal.client?.full_name || editingSlotModal.candidate_name || 'Candidate'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingSlotModal(null)}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {editSlotError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{editSlotError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveSlotEdit} className="space-y-3.5">
+              {/* Candidate Info Pill */}
+              <div className="bg-black/60 border border-zinc-800 rounded-xl p-2.5 text-xs flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <span className="text-[10px] uppercase font-bold text-zinc-500">Candidate</span>
+                  <p className="font-extrabold text-white">
+                    {editingSlotModal.client?.full_name || editingSlotModal.candidate_name || 'Candidate'}
+                  </p>
+                </div>
+                {editingSlotModal.client?.whatsapp_number && (
+                  <span className="font-mono text-zinc-400 text-[11px]">
+                    {editingSlotModal.client.whatsapp_number}
+                  </span>
+                )}
+              </div>
+
+              {/* Company Name */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Company Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editSlotForm.company_name}
+                  onChange={(e) =>
+                    setEditSlotForm({ ...editSlotForm, company_name: e.target.value })
+                  }
+                  placeholder="e.g. Swiggy, Google, Microsoft"
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Round Type */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Interview Round *
+                </label>
+                <select
+                  value={isEditSlotCustomRound ? 'Custom' : editSlotForm.round_type}
+                  onChange={(e) => {
+                    if (e.target.value === 'Custom') {
+                      setIsEditSlotCustomRound(true);
+                    } else {
+                      setIsEditSlotCustomRound(false);
+                      setEditSlotForm({ ...editSlotForm, round_type: e.target.value });
+                    }
+                  }}
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                >
+                  <option value="Technical Coding L1">Technical Coding L1</option>
+                  <option value="System Design L2">System Design L2</option>
+                  <option value="Screening Round">Screening Round</option>
+                  <option value="Hiring Manager L3">Hiring Manager L3</option>
+                  <option value="HR Discussion">HR Discussion</option>
+                  <option value="Custom">Custom (Enter manually)...</option>
+                </select>
+              </div>
+
+              {isEditSlotCustomRound && (
+                <div>
+                  <label className="block text-[11px] font-bold text-emerald-400 mb-1">
+                    Custom Round Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editSlotCustomRoundText}
+                    onChange={(e) => setEditSlotCustomRoundText(e.target.value)}
+                    placeholder="e.g. Architecture Deep-Dive, Live Debugging"
+                    className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {/* Date & Time */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Scheduled Date (IST) *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={editSlotForm.scheduled_date}
+                    onChange={(e) =>
+                      setEditSlotForm({ ...editSlotForm, scheduled_date: e.target.value })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Scheduled Time (IST) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editSlotForm.scheduled_time}
+                    onChange={(e) =>
+                      setEditSlotForm({ ...editSlotForm, scheduled_time: e.target.value })
+                    }
+                    placeholder="02:30 PM IST"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Status & Round Fee */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Status *
+                  </label>
+                  <select
+                    value={editSlotForm.status}
+                    onChange={(e) =>
+                      setEditSlotForm({
+                        ...editSlotForm,
+                        status: e.target.value as DatabaseInterviewSlot['status'],
+                      })
+                    }
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                  >
+                    <option value="requested">Requested</option>
+                    <option value="approved">Approved</option>
+                    <option value="rescheduled">Rescheduled</option>
+                    <option value="declined">Declined</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-300 mb-1">
+                    Round Fee
+                  </label>
+                  <input
+                    type="text"
+                    value={editSlotForm.round_fee}
+                    onChange={(e) =>
+                      setEditSlotForm({ ...editSlotForm, round_fee: e.target.value })
+                    }
+                    placeholder="e.g. Emergency Round or ₹3,000"
+                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Meeting Link */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Google Meet / Zoom Link
+                </label>
+                <input
+                  type="url"
+                  value={editSlotForm.meeting_link}
+                  onChange={(e) =>
+                    setEditSlotForm({ ...editSlotForm, meeting_link: e.target.value })
+                  }
+                  placeholder="https://meet.google.com/xyz-abc-def"
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Notes / JD */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  JD / Key Topics / Mentor Notes
+                </label>
+                <textarea
+                  rows={2}
+                  value={editSlotForm.jd_text}
+                  onChange={(e) =>
+                    setEditSlotForm({ ...editSlotForm, jd_text: e.target.value })
+                  }
+                  placeholder="e.g. Distributed caching, Redis, Kafka, System Design"
+                  className="w-full bg-black border border-zinc-800 rounded-xl p-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingSlotModal(null)}
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingSlotEdit || !editSlotForm.company_name.trim()}
+                  className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors disabled:opacity-50"
+                >
+                  {isSavingSlotEdit ? 'Saving...' : 'Save Slot Changes'}
                 </button>
               </div>
             </form>

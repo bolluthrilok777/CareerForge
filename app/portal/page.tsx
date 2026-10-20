@@ -77,7 +77,6 @@ export default function CandidatePortal() {
 
   // Modal State
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
-  const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [isSubmittingSlot, setIsSubmittingSlot] = useState(false);
 
   // Custom Round Type State
@@ -102,11 +101,19 @@ export default function CandidatePortal() {
     jd_text: '',
   });
 
-  // Calendar Selection State
-  const [calendarDate, setCalendarDate] = useState('2026-10-21');
-  const [calendarTime, setCalendarTime] = useState('02:30 PM IST');
-  const [conflictWarning, setConflictWarning] = useState<string | null>(null);
-  const [suggestedSlots, setSuggestedSlots] = useState<string[]>([]);
+  // Edit My Slot (Reschedule) Modal State
+  const [editingMySlot, setEditingMySlot] = useState<DatabaseInterviewSlot | null>(null);
+  const [editMySlotForm, setEditMySlotForm] = useState({
+    company_name: '',
+    round_type: 'Technical Coding L1',
+    scheduled_date: '2026-10-21',
+    scheduled_time: '02:30 PM IST',
+    jd_text: '',
+  });
+  const [isEditMySlotCustomRound, setIsEditMySlotCustomRound] = useState(false);
+  const [editMySlotCustomRoundText, setEditMySlotCustomRoundText] = useState('');
+  const [isSavingMySlotEdit, setIsSavingMySlotEdit] = useState(false);
+  const [editMySlotError, setEditMySlotError] = useState<string | null>(null);
 
   // In-Memory Invite Screenshot Scanner
   const [inviteFile, setInviteFile] = useState<File | null>(null);
@@ -192,20 +199,103 @@ export default function CandidatePortal() {
     };
   }, [currentClient?.id]);
 
-  // Conflict detection for Calendar Day-Planner
-  useEffect(() => {
-    const collision = checkSlotCollision(calendarTime, calendarDate, allSlots);
-    if (collision.isClash) {
-      setConflictWarning(collision.message || 'Time slot clash detected.');
-      const available = getTimeSlotsAvailability(calendarDate, allSlots)
-        .filter((s) => !s.isBooked)
-        .map((s) => s.time);
-      setSuggestedSlots(available.slice(0, 2));
-    } else {
-      setConflictWarning(null);
-      setSuggestedSlots([]);
+  // Open Edit/Reschedule My Slot Modal
+  const handleOpenEditMySlot = (slot: DatabaseInterviewSlot) => {
+    const standardRounds = [
+      'Technical Coding L1',
+      'System Design L2',
+      'Screening Round',
+      'Hiring Manager L3',
+      'HR Discussion',
+    ];
+    const isCustom = !standardRounds.includes(slot.round_type);
+    setIsEditMySlotCustomRound(isCustom);
+    setEditMySlotCustomRoundText(isCustom ? slot.round_type : '');
+    setEditMySlotForm({
+      company_name: slot.company_name || '',
+      round_type: isCustom ? 'Custom' : slot.round_type,
+      scheduled_date: slot.scheduled_date || '2026-10-21',
+      scheduled_time: slot.scheduled_time || '02:30 PM IST',
+      jd_text: slot.jd_text || '',
+    });
+    setEditMySlotError(null);
+    setEditingMySlot(slot);
+  };
+
+  // Save Edit/Reschedule My Slot (Resets status to 'requested' for Admin Re-Approval)
+  const handleSaveMySlotEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingMySlot) return;
+    setEditMySlotError(null);
+
+    const effectiveRoundType = isEditMySlotCustomRound
+      ? editMySlotCustomRoundText.trim()
+      : editMySlotForm.round_type;
+
+    if (isEditMySlotCustomRound && !editMySlotCustomRoundText.trim()) {
+      setEditMySlotError('Please enter your custom round type name.');
+      return;
     }
-  }, [calendarDate, calendarTime, allSlots]);
+
+    // Clash detection against all other slots
+    const collision = checkSlotCollision(
+      editMySlotForm.scheduled_time,
+      editMySlotForm.scheduled_date,
+      allSlots,
+      editingMySlot.id
+    );
+    if (collision.isClash) {
+      setEditMySlotError(
+        collision.message || 'This time slot is already booked. Please choose an open slot.'
+      );
+      return;
+    }
+
+    setIsSavingMySlotEdit(true);
+    try {
+      const updatePayload = {
+        company_name: editMySlotForm.company_name.trim(),
+        round_type: effectiveRoundType,
+        scheduled_date: editMySlotForm.scheduled_date,
+        scheduled_time: editMySlotForm.scheduled_time,
+        jd_text: editMySlotForm.jd_text.trim() || null,
+        status: 'requested' as const, // Automatically reset for admin approval!
+      };
+
+      const { data, error } = await supabase
+        .from('interview_slots')
+        .update(updatePayload)
+        .eq('id', editingMySlot.id)
+        .select('*, client:clients(*)');
+
+      if (error) throw new Error(error.message);
+
+      const updatedSlot = data && data[0] ? data[0] : { ...editingMySlot, ...updatePayload };
+
+      setAllSlots((prev) =>
+        prev.map((s) => (s.id === editingMySlot.id ? updatedSlot : s))
+      );
+
+      broadcastSync('SLOT_UPDATED', { slotId: editingMySlot.id, ...updatePayload });
+
+      // Trigger WhatsApp Alert to Admin
+      triggerWhatsAppAlert('client_slot_rescheduled', {
+        client_name: currentClient?.full_name || 'Candidate',
+        company_name: editMySlotForm.company_name.trim(),
+        round_type: effectiveRoundType,
+        date: editMySlotForm.scheduled_date,
+        time: editMySlotForm.scheduled_time,
+      });
+
+      showToast('Interview slot updated! Requested admin re-approval.');
+      setEditingMySlot(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not update slot. Please try again.';
+      setEditMySlotError(msg);
+    } finally {
+      setIsSavingMySlotEdit(false);
+    }
+  };
 
   // In-Memory Invite Screenshot Scanner (Zero server storage)
   const handleDropInvite = (file: File) => {
@@ -445,7 +535,7 @@ export default function CandidatePortal() {
 
   const mySlots = allSlots.filter((s) => s.client_id === currentClient?.id);
   const upcomingDates = getUpcomingDates();
-  const confirmedSlotsOnDate = allSlots.filter((s) => s.scheduled_date === calendarDate);
+  const confirmedSlotsOnDate = allSlots.filter((s) => s.scheduled_date === slotForm.scheduled_date);
 
   const profilesStatus = currentClient?.naukri_status || currentClient?.profiles_status || 'in_progress';
 
@@ -737,16 +827,49 @@ export default function CandidatePortal() {
                         </div>
                       </div>
 
-                      <span
-                        className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 ${
-                          slot.status === 'approved'
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                            : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                        }`}
-                      >
-                        {slot.status === 'approved' ? 'Approved' : 'Requested'}
-                      </span>
+                      <div className="flex flex-col sm:flex-row items-end sm:items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditMySlot(slot)}
+                          className="inline-flex items-center gap-1 text-[11px] font-bold text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+                        >
+                          <Edit3 className="w-3 h-3 text-zinc-400" />
+                          <span>Reschedule</span>
+                        </button>
+                        <span
+                          className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 ${
+                            slot.status === 'approved'
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                              : slot.status === 'rescheduled'
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                              : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                          }`}
+                        >
+                          {slot.status === 'approved'
+                            ? 'Approved'
+                            : slot.status === 'rescheduled'
+                            ? 'Rescheduled (Pending Approval)'
+                            : 'Requested (Pending Approval)'}
+                        </span>
+                      </div>
                     </div>
+
+                    {slot.meeting_link && (
+                      <div className="flex items-center gap-2 text-xs text-emerald-300 bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/20">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span>
+                          Meeting link ready:{' '}
+                          <a
+                            href={slot.meeting_link}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline font-bold text-white hover:text-emerald-300"
+                          >
+                            Join Video Call
+                          </a>
+                        </span>
+                      </div>
+                    )}
 
                     <div className="flex items-center gap-2 text-xs text-zinc-300 bg-black/60 p-2.5 rounded-xl border border-zinc-800">
                       <MessageCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -986,26 +1109,146 @@ export default function CandidatePortal() {
                 </div>
               )}
 
-              {/* Date & Time Selector */}
-              <div>
-                <label className="block text-xs font-bold text-zinc-300 mb-1">
-                  Interview Date & Time (IST) *
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setIsCalendarOpen(true)}
-                  className="w-full text-left bg-black hover:bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 flex items-center justify-between text-xs text-white transition-colors"
-                >
-                  <div className="flex items-center gap-2">
-                    <Calendar className="w-4 h-4 text-zinc-400" />
-                    <span className="font-mono font-bold">
-                      {slotForm.scheduled_date} • {slotForm.scheduled_time}
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-white font-extrabold underline">
-                    Change Date/Time
+              {/* Inline Date Selector */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300">
+                    Interview Date (IST) *
+                  </label>
+                  <span className="text-[11px] font-mono text-zinc-400 font-bold">
+                    {slotForm.scheduled_date}
                   </span>
-                </button>
+                </div>
+
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+                  {upcomingDates.map(({ dateStr, label, dayName }) => {
+                    const isSelected = dateStr === slotForm.scheduled_date;
+                    const bookedCount = allSlots.filter(
+                      (s) =>
+                        s.scheduled_date === dateStr &&
+                        s.status !== 'declined' &&
+                        s.status !== 'cancelled'
+                    ).length;
+
+                    return (
+                      <button
+                        key={dateStr}
+                        type="button"
+                        onClick={() => {
+                          setSlotForm((prev) => ({ ...prev, scheduled_date: dateStr }));
+                          const avail = getTimeSlotsAvailability(dateStr, allSlots);
+                          const firstFree = avail.find((a) => !a.isBooked);
+                          if (firstFree) {
+                            setSlotForm((prev) => ({ ...prev, scheduled_time: firstFree.time }));
+                          }
+                        }}
+                        className={`flex flex-col items-center py-2 px-3 rounded-2xl border text-center shrink-0 transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-white text-black border-white shadow-md'
+                            : 'bg-black border-zinc-800 text-zinc-400 hover:bg-zinc-900'
+                        }`}
+                      >
+                        <span className="text-[10px] font-mono uppercase">{dayName}</span>
+                        <strong className="text-xs font-extrabold mt-0.5">{label}</strong>
+                        <span
+                          className={`text-[9px] mt-1 px-1 rounded font-mono ${
+                            isSelected
+                              ? 'bg-zinc-800 text-white'
+                              : bookedCount > 0
+                              ? 'bg-zinc-900 text-zinc-500'
+                              : 'bg-zinc-900 text-emerald-400'
+                          }`}
+                        >
+                          {bookedCount > 0 ? `${bookedCount} booked` : 'Open'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] pt-0.5">
+                  <span className="text-zinc-500">Or pick other date:</span>
+                  <input
+                    type="date"
+                    value={slotForm.scheduled_date}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setSlotForm((prev) => ({ ...prev, scheduled_date: e.target.value }));
+                      }
+                    }}
+                    className="bg-black border border-zinc-800 rounded-lg px-2 py-0.5 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Inline Time Slot Selector */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300">
+                    Interview Time (IST) *
+                  </label>
+                  <span className="text-[11px] font-mono text-zinc-400 font-bold">
+                    {slotForm.scheduled_time}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-36 overflow-y-auto p-1.5 bg-black/60 border border-zinc-800 rounded-xl">
+                  {getTimeSlotsAvailability(slotForm.scheduled_date, allSlots).map(
+                    ({ time, isBooked, conflictInfo }) => {
+                      const isSelected = slotForm.scheduled_time === time;
+                      return (
+                        <button
+                          key={time}
+                          type="button"
+                          onClick={() =>
+                            setSlotForm((prev) => ({ ...prev, scheduled_time: time }))
+                          }
+                          title={isBooked ? `Clash: ${conflictInfo}` : undefined}
+                          className={`py-1.5 px-1 rounded-xl text-center border text-[11px] font-mono transition-all flex flex-col items-center justify-center cursor-pointer ${
+                            isSelected
+                              ? 'bg-white text-black font-extrabold border-white shadow-md'
+                              : isBooked
+                              ? 'bg-zinc-950 border-red-900/40 text-red-400/80 hover:border-red-700'
+                              : 'bg-black border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-white'
+                          }`}
+                        >
+                          <span>{time.replace(' IST', '')}</span>
+                          <span
+                            className={`text-[9px] mt-0.5 ${
+                              isSelected
+                                ? 'text-zinc-800 font-bold'
+                                : isBooked
+                                ? 'text-red-400 font-semibold'
+                                : 'text-zinc-500'
+                            }`}
+                          >
+                            {isBooked ? 'Clash' : 'Free'}
+                          </span>
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+
+                {/* Conflict warning if the chosen time has a clash */}
+                {(() => {
+                  const check = checkSlotCollision(
+                    slotForm.scheduled_time,
+                    slotForm.scheduled_date,
+                    allSlots
+                  );
+                  if (check.isClash) {
+                    return (
+                      <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-[11px] text-amber-300 flex items-start gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                        <div>
+                          <strong>Mentor Slot Busy:</strong> {check.message}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
 
               <div>
@@ -1044,200 +1287,285 @@ export default function CandidatePortal() {
       )}
 
       {/* ======================================================== */}
-      {/* MODAL: CALENDAR DAY-PLANNER & CONFLICT CHECKER           */}
+      {/* MODAL: RESCHEDULE / EDIT MY INTERVIEW SLOT               */}
       {/* ======================================================== */}
-      {isCalendarOpen && (
-        <div className="fixed inset-0 z-60 bg-black/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="bg-[#121214] rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto border border-zinc-800 text-white">
+      {editingMySlot && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#121214] rounded-3xl max-w-md w-full p-6 border border-zinc-800 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto text-white">
             <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
               <div>
-                <h3 className="text-base font-extrabold text-white">Choose Date & Time</h3>
+                <h3 className="text-sm font-extrabold text-white flex items-center gap-1.5">
+                  <Edit3 className="w-4 h-4 text-emerald-400" />
+                  <span>Reschedule Interview Slot</span>
+                </h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Inspect scheduled interviews to avoid mentor clashes.
+                  Changes will be submitted for admin re-approval.
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setIsCalendarOpen(false)}
+                onClick={() => setEditingMySlot(null)}
                 className="p-1.5 text-zinc-400 hover:text-white rounded-lg"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Date Scroller */}
-            <div>
-              <label className="block text-xs font-bold text-zinc-300 mb-2">
-                Select Date
-              </label>
-              <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
-                {upcomingDates.map(({ dateStr, label, dayName }) => {
-                  const isSelected = dateStr === calendarDate;
-                  const count = allSlots.filter((s) => s.scheduled_date === dateStr).length;
-                  return (
-                    <button
-                      key={dateStr}
-                      type="button"
-                      onClick={() => setCalendarDate(dateStr)}
-                      className={`flex flex-col items-center py-2 px-3 rounded-2xl border text-center shrink-0 transition-all ${
-                        isSelected
-                          ? 'bg-white text-black border-white shadow-md'
-                          : 'bg-black border-zinc-800 text-zinc-400 hover:bg-zinc-900'
-                      }`}
-                    >
-                      <span className="text-[10px] font-mono uppercase">{dayName}</span>
-                      <strong className="text-xs font-extrabold mt-0.5">{label}</strong>
-                      {count > 0 && (
-                        <span
-                          className={`text-[9px] mt-1 px-1 rounded font-mono ${
-                            isSelected ? 'bg-zinc-800 text-white' : 'bg-zinc-800 text-zinc-400'
-                          }`}
-                        >
-                          {count} {count === 1 ? 'slot' : 'slots'}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Day Schedule Timeline */}
-            <div className="bg-black/60 border border-zinc-800 rounded-2xl p-3.5 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-extrabold text-white">
-                  Interviews on {calendarDate}
-                </span>
-                <span className="text-[11px] font-mono text-zinc-400 font-bold">
-                  {confirmedSlotsOnDate.length} Booked
-                </span>
-              </div>
-
-              {confirmedSlotsOnDate.length === 0 ? (
-                <p className="text-xs text-zinc-400 italic py-1">
-                  ✨ No interviews scheduled on this day. Mentors are completely free.
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {confirmedSlotsOnDate.map((s) => (
-                    <div
-                      key={s.id}
-                      className="bg-[#18181b] border border-zinc-800 rounded-xl p-2.5 flex items-center justify-between text-xs"
-                    >
-                      <div>
-                        <div className="font-extrabold text-white">
-                          {s.company_name} • {s.round_type}
-                        </div>
-                        <div className="text-[11px] text-zinc-400">
-                          Candidate: {s.candidate_name || 'Booked Slot'}
-                        </div>
-                      </div>
-                      <span className="font-mono text-xs font-extrabold text-white bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
-                        {s.scheduled_time}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Time Slot Picker with Booked Slots Auto-Disabled */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs font-bold text-zinc-300">
-                  Target Interview Time (IST) *
-                </label>
-                <span className="text-[10px] text-zinc-500 font-mono">
-                  Booked slots auto-disabled
-                </span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-2">
-                {getTimeSlotsAvailability(calendarDate, allSlots).map(
-                  ({ time, isBooked, conflictInfo }) => {
-                    const isSelected = calendarTime === time;
-                    return (
-                      <button
-                        key={time}
-                        type="button"
-                        disabled={isBooked}
-                        onClick={() => setCalendarTime(time)}
-                        title={isBooked ? `Clashes with ${conflictInfo}` : 'Slot available'}
-                        className={`py-2 px-2 text-xs font-mono font-bold rounded-xl border text-center transition-all ${
-                          isBooked
-                            ? 'opacity-35 line-through bg-zinc-950 border-zinc-900 text-zinc-600 cursor-not-allowed'
-                            : isSelected
-                            ? 'bg-white text-black border-white shadow-md font-extrabold'
-                            : 'bg-black border-zinc-800 text-zinc-300 hover:bg-zinc-900 hover:text-white'
-                        }`}
-                      >
-                        <div>{time}</div>
-                        {isBooked && (
-                          <span className="text-[9px] text-red-400/80 block no-underline font-normal">
-                            Booked
-                          </span>
-                        )}
-                      </button>
-                    );
-                  }
-                )}
-              </div>
-
-              <input
-                type="text"
-                value={calendarTime}
-                onChange={(e) => setCalendarTime(e.target.value)}
-                placeholder="Or custom: 03:15 PM IST"
-                className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:border-zinc-500 focus:outline-none"
-              />
-            </div>
-
-            {/* Conflict Banner */}
-            {conflictWarning && (
-              <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs space-y-2">
-                <div className="flex items-start gap-2 text-amber-400 font-extrabold">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <span>{conflictWarning}</span>
-                </div>
-
-                {suggestedSlots.length > 0 && (
-                  <div>
-                    <span className="block text-[11px] text-amber-300/80 font-medium mb-1">
-                      Available open slots on this day:
-                    </span>
-                    <div className="flex gap-2">
-                      {suggestedSlots.map((alt) => (
-                        <button
-                          key={alt}
-                          type="button"
-                          onClick={() => setCalendarTime(alt)}
-                          className="bg-amber-500/20 border border-amber-500/40 text-amber-300 font-mono text-[11px] px-2.5 py-1 rounded-lg font-bold"
-                        >
-                          Use {alt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
+            {editMySlotError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{editMySlotError}</span>
               </div>
             )}
 
-            <button
-              type="button"
-              disabled={Boolean(conflictWarning)}
-              onClick={() => {
-                if (conflictWarning) return;
-                setSlotForm((prev) => ({
-                  ...prev,
-                  scheduled_date: calendarDate,
-                  scheduled_time: calendarTime,
-                }));
-                setIsCalendarOpen(false);
-              }}
-              className="w-full bg-white hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed text-black font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
-            >
-              <span>{conflictWarning ? 'Slot Unavailable' : 'Apply Date & Time'}</span>
-              <Check className="w-4 h-4" />
-            </button>
+            <form onSubmit={handleSaveMySlotEdit} className="space-y-3.5">
+              {/* Company Name */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Company Name *
+                </label>
+                <div className="relative">
+                  <Building className="w-4 h-4 absolute left-3 top-2.5 text-zinc-500" />
+                  <input
+                    type="text"
+                    required
+                    value={editMySlotForm.company_name}
+                    onChange={(e) =>
+                      setEditMySlotForm({ ...editMySlotForm, company_name: e.target.value })
+                    }
+                    placeholder="e.g. Swiggy, Wells Fargo, PhonePe"
+                    className="w-full bg-black border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Round Type */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Interview Round *
+                </label>
+                <select
+                  value={isEditMySlotCustomRound ? 'Custom' : editMySlotForm.round_type}
+                  onChange={(e) => {
+                    if (e.target.value === 'Custom') {
+                      setIsEditMySlotCustomRound(true);
+                    } else {
+                      setIsEditMySlotCustomRound(false);
+                      setEditMySlotForm({ ...editMySlotForm, round_type: e.target.value });
+                    }
+                  }}
+                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                >
+                  <option value="Technical Coding L1">Technical Coding L1</option>
+                  <option value="System Design L2">System Design L2</option>
+                  <option value="Screening Round">Screening Round</option>
+                  <option value="Hiring Manager L3">Hiring Manager L3</option>
+                  <option value="HR Discussion">HR Discussion</option>
+                  <option value="Custom">Custom (Enter manually)...</option>
+                </select>
+              </div>
+
+              {isEditMySlotCustomRound && (
+                <div>
+                  <label className="block text-[11px] font-bold text-emerald-400 mb-1">
+                    Custom Round Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editMySlotCustomRoundText}
+                    onChange={(e) => setEditMySlotCustomRoundText(e.target.value)}
+                    placeholder="e.g. Director Round, Live architecture"
+                    className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {/* Inline Date Selector */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300">
+                    Interview Date (IST) *
+                  </label>
+                  <span className="text-[11px] font-mono text-zinc-400 font-bold">
+                    {editMySlotForm.scheduled_date}
+                  </span>
+                </div>
+
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+                  {upcomingDates.map(({ dateStr, label, dayName }) => {
+                    const isSelected = dateStr === editMySlotForm.scheduled_date;
+                    const bookedCount = allSlots.filter(
+                      (s) =>
+                        s.scheduled_date === dateStr &&
+                        s.id !== editingMySlot.id &&
+                        s.status !== 'declined' &&
+                        s.status !== 'cancelled'
+                    ).length;
+
+                    return (
+                      <button
+                        key={dateStr}
+                        type="button"
+                        onClick={() => {
+                          setEditMySlotForm((prev) => ({ ...prev, scheduled_date: dateStr }));
+                          const avail = getTimeSlotsAvailability(dateStr, allSlots, editingMySlot.id);
+                          const firstFree = avail.find((a) => !a.isBooked);
+                          if (firstFree) {
+                            setEditMySlotForm((prev) => ({ ...prev, scheduled_time: firstFree.time }));
+                          }
+                        }}
+                        className={`flex flex-col items-center py-2 px-3 rounded-2xl border text-center shrink-0 transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-white text-black border-white shadow-md'
+                            : 'bg-black border-zinc-800 text-zinc-400 hover:bg-zinc-900'
+                        }`}
+                      >
+                        <span className="text-[10px] font-mono uppercase">{dayName}</span>
+                        <strong className="text-xs font-extrabold mt-0.5">{label}</strong>
+                        <span
+                          className={`text-[9px] mt-1 px-1 rounded font-mono ${
+                            isSelected
+                              ? 'bg-zinc-800 text-white'
+                              : bookedCount > 0
+                              ? 'bg-zinc-900 text-zinc-500'
+                              : 'bg-zinc-900 text-emerald-400'
+                          }`}
+                        >
+                          {bookedCount > 0 ? `${bookedCount} booked` : 'Open'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] pt-0.5">
+                  <span className="text-zinc-500">Or pick other date:</span>
+                  <input
+                    type="date"
+                    value={editMySlotForm.scheduled_date}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setEditMySlotForm((prev) => ({ ...prev, scheduled_date: e.target.value }));
+                      }
+                    }}
+                    className="bg-black border border-zinc-800 rounded-lg px-2 py-0.5 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Inline Time Slot Selector */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300">
+                    Interview Time (IST) *
+                  </label>
+                  <span className="text-[11px] font-mono text-zinc-400 font-bold">
+                    {editMySlotForm.scheduled_time}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-36 overflow-y-auto p-1.5 bg-black/60 border border-zinc-800 rounded-xl">
+                  {getTimeSlotsAvailability(editMySlotForm.scheduled_date, allSlots, editingMySlot.id).map(
+                    ({ time, isBooked, conflictInfo }) => {
+                      const isSelected = editMySlotForm.scheduled_time === time;
+                      return (
+                        <button
+                          key={time}
+                          type="button"
+                          onClick={() =>
+                            setEditMySlotForm((prev) => ({ ...prev, scheduled_time: time }))
+                          }
+                          title={isBooked ? `Clash: ${conflictInfo}` : undefined}
+                          className={`py-1.5 px-1 rounded-xl text-center border text-[11px] font-mono transition-all flex flex-col items-center justify-center cursor-pointer ${
+                            isSelected
+                              ? 'bg-white text-black font-extrabold border-white shadow-md'
+                              : isBooked
+                              ? 'bg-zinc-950 border-red-900/40 text-red-400/80 hover:border-red-700'
+                              : 'bg-black border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-white'
+                          }`}
+                        >
+                          <span>{time.replace(' IST', '')}</span>
+                          <span
+                            className={`text-[9px] mt-0.5 ${
+                              isSelected
+                                ? 'text-zinc-800 font-bold'
+                                : isBooked
+                                ? 'text-red-400 font-semibold'
+                                : 'text-zinc-500'
+                            }`}
+                          >
+                            {isBooked ? 'Clash' : 'Free'}
+                          </span>
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+
+                {/* Conflict warning if the chosen time has a clash */}
+                {(() => {
+                  const check = checkSlotCollision(
+                    editMySlotForm.scheduled_time,
+                    editMySlotForm.scheduled_date,
+                    allSlots,
+                    editingMySlot.id
+                  );
+                  if (check.isClash) {
+                    return (
+                      <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-[11px] text-amber-300 flex items-start gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                        <div>
+                          <strong>Mentor Slot Busy:</strong> {check.message}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              {/* Notes / JD */}
+              <div>
+                <label className="block text-xs font-bold text-zinc-300 mb-1">
+                  Key Topics / Notes
+                </label>
+                <textarea
+                  rows={2}
+                  value={editMySlotForm.jd_text}
+                  onChange={(e) =>
+                    setEditMySlotForm({ ...editMySlotForm, jd_text: e.target.value })
+                  }
+                  placeholder="e.g. Distributed caching, Redis, Spring Cloud, live coding"
+                  className="w-full bg-black border border-zinc-800 rounded-xl p-2.5 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Re-approval notice */}
+              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-[11px] text-amber-300 flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Admin Re-Approval Required:</strong> Rescheduling will reset this slot's status to <em>Requested</em> and ping the operations team on WhatsApp to confirm the new mentor assignment.
+                </span>
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setEditingMySlot(null)}
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingMySlotEdit || !editMySlotForm.company_name.trim()}
+                  className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors disabled:opacity-50"
+                >
+                  {isSavingMySlotEdit ? 'Rescheduling...' : 'Save & Request Approval'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
