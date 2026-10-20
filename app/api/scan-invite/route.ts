@@ -54,29 +54,51 @@ function parseInterviewText(text: string): ExtractedInviteData {
     }
   });
 
-  // 2. Meeting Link Detection
+  // 2. Meeting Link & Video Conference Platform Detection
   let meetingLink: string | null = null;
-  const meetMatch = text.match(/https?:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i);
-  const zoomMatch = text.match(/https?:\/\/[\w-]+\.zoom\.us\/[js]\/\d+[\w?=&-]*/i);
+  const meetMatch = text.match(/https?:\/\/meet\.google\.com\/[a-z0-9-]+/i);
+  const zoomMatch = text.match(/https?:\/\/[a-z0-9-.]*zoom\.us\/(?:j|my|s)\/[0-9a-zA-Z?=&_.-]+/i);
   const teamsMatch = text.match(/https?:\/\/teams\.microsoft\.com\/l\/meetup-join\/[\w%?=&.-]+/i);
   const webexMatch = text.match(/https?:\/\/[\w-]+\.webex\.com\/[\w/.-]+/i);
+  const coderpadMatch = text.match(/https?:\/\/(?:app\.)?coderpad\.io\/[a-z0-9-]+/i);
+  const hackerrankMatch = text.match(/https?:\/\/(?:www\.)?hackerrank\.com\/tests\/[a-z0-9-]+/i);
 
   if (meetMatch) {
     meetingLink = meetMatch[0];
-    score += 30;
+    score += 35;
     signals.push('Google Meet Conference Link');
   } else if (zoomMatch) {
     meetingLink = zoomMatch[0];
-    score += 30;
+    score += 35;
     signals.push('Zoom Video Conference Link');
+  } else if (/zoom(?:\.us|\s+meeting|\s+call|\s+link|\s+invitation)/i.test(text)) {
+    score += 30;
+    signals.push('Zoom Meeting Details');
   } else if (teamsMatch) {
     meetingLink = teamsMatch[0];
-    score += 30;
+    score += 35;
     signals.push('Microsoft Teams Conference Link');
+  } else if (/microsoft\s+teams/i.test(text)) {
+    score += 30;
+    signals.push('Microsoft Teams Meeting');
   } else if (webexMatch) {
     meetingLink = webexMatch[0];
-    score += 25;
+    score += 30;
     signals.push('Webex Conference Link');
+  } else if (coderpadMatch) {
+    meetingLink = coderpadMatch[0];
+    score += 30;
+    signals.push('CoderPad Live Interview Environment');
+  } else if (hackerrankMatch) {
+    meetingLink = hackerrankMatch[0];
+    score += 30;
+    signals.push('HackerRank Code Assessment');
+  }
+
+  // Meeting ID & Passcode Signals
+  if (/(?:meeting\s*id|passcode|conference\s*id|meeting\s*url|video\s*call\s*link)/i.test(text)) {
+    score += 20;
+    signals.push('Meeting Credentials / Join Link Detected');
   }
 
   // 3. Email & Calendar Header Signals
@@ -193,6 +215,25 @@ function parseInterviewText(text: string): ExtractedInviteData {
   };
 }
 
+// Cached singleton worker for instant sub-second OCR scans
+let cachedWorker: Tesseract.Worker | null = null;
+let cachedWorkerPromise: Promise<Tesseract.Worker> | null = null;
+
+async function getOcrWorker(): Promise<Tesseract.Worker> {
+  if (cachedWorker) return cachedWorker;
+  if (!cachedWorkerPromise) {
+    cachedWorkerPromise = Tesseract.createWorker('eng').then((w) => {
+      cachedWorker = w;
+      return w;
+    }).catch((err) => {
+      cachedWorker = null;
+      cachedWorkerPromise = null;
+      throw err;
+    });
+  }
+  return cachedWorkerPromise;
+}
+
 export async function POST(request: Request) {
   try {
     const contentType = request.headers.get('content-type') || '';
@@ -204,7 +245,12 @@ export async function POST(request: Request) {
       const base64Data = body.image_base64 || body.image;
       if (!base64Data) {
         return NextResponse.json(
-          { success: false, error: 'No image data provided' },
+          {
+            success: false,
+            isGenuine: false,
+            statusMessage: 'No interview details found in screenshot',
+            error: 'No image data provided',
+          },
           { status: 400 }
         );
       }
@@ -221,7 +267,12 @@ export async function POST(request: Request) {
       const file = formData.get('file') as File | null;
       if (!file) {
         return NextResponse.json(
-          { success: false, error: 'No file uploaded in form data' },
+          {
+            success: false,
+            isGenuine: false,
+            statusMessage: 'No interview details found in screenshot',
+            error: 'No file uploaded in form data',
+          },
           { status: 400 }
         );
       }
@@ -232,35 +283,43 @@ export async function POST(request: Request) {
 
     if (!imageBuffer || imageBuffer.length === 0) {
       return NextResponse.json(
-        { success: false, error: 'Could not parse image buffer' },
+        {
+          success: false,
+          isGenuine: false,
+          statusMessage: 'No interview details found in screenshot',
+          error: 'Could not parse image buffer',
+        },
         { status: 400 }
       );
     }
 
-    // Run Real Tesseract OCR
-    const worker = await Tesseract.createWorker('eng');
+    // Run Real Tesseract OCR via warm cached worker
+    const worker = await getOcrWorker();
     const ret = await worker.recognize(imageBuffer);
     const text = ret.data.text || '';
-    await worker.terminate();
 
-    // Parse extracted text
+    // Parse extracted text for Zoom links, schedule, and interview details
     const parsed = parseInterviewText(text);
+
+    // Exact status message requested by user
+    const statusMessage = parsed.isGenuine
+      ? 'Verified screenshot viewed by mentor'
+      : 'No interview details found in screenshot';
 
     // Build 24-hour expiration metadata
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // exactly 24 hours
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours
 
     // Generate compact base64 representation for 24hr admin preview
-    // If original image is too large (>200KB), truncate or downscale to save cloud DB space
     let previewDataUrl = `data:${mimeType};base64,${imageBuffer.toString('base64')}`;
     if (previewDataUrl.length > 250000) {
-      // Keep data manageable to save cloud space
       previewDataUrl = previewDataUrl.slice(0, 250000);
     }
 
     return NextResponse.json({
       success: true,
       isGenuine: parsed.isGenuine,
+      statusMessage,
       confidence: parsed.confidence,
       detectedCompany: parsed.detectedCompany,
       detectedRound: parsed.detectedRound,
@@ -278,9 +337,15 @@ export async function POST(request: Request) {
     });
   } catch (err: unknown) {
     console.error('OCR scanning error in /api/scan-invite:', err);
+    // Reset cached worker in case of crashed worker
+    cachedWorker = null;
+    cachedWorkerPromise = null;
+
     return NextResponse.json(
       {
         success: false,
+        isGenuine: false,
+        statusMessage: 'No interview details found in screenshot',
         error: err instanceof Error ? err.message : 'Failed to scan screenshot image',
       },
       { status: 500 }

@@ -1271,7 +1271,7 @@ export default function MobileAdminCommandCenter() {
                   </p>
                 </div>
 
-                {/* Filter Pills to clearly differentiate Retainer Candidates vs Emergency */}
+                {/* Filter Pills: All / Registered / Instant */}
                 <div className="flex items-center gap-1 p-1 bg-black border border-zinc-800 rounded-xl overflow-x-auto scrollbar-none">
                   <button
                     type="button"
@@ -1293,8 +1293,7 @@ export default function MobileAdminCommandCenter() {
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
-                    <ShieldCheck className="w-3 h-3" />
-                    <span>Retainer Candidates ({candidateSlotsCount})</span>
+                    <span>Registered ({candidateSlotsCount})</span>
                   </button>
                   <button
                     type="button"
@@ -1305,8 +1304,7 @@ export default function MobileAdminCommandCenter() {
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
-                    <Zap className="w-3 h-3 fill-current" />
-                    <span>Instant Emergency ({emergencySlotsCount})</span>
+                    <span>Instant ({emergencySlotsCount})</span>
                   </button>
                 </div>
               </div>
@@ -1371,44 +1369,35 @@ export default function MobileAdminCommandCenter() {
                                       {slot.scheduled_time}
                                     </div>
 
-                                    {/* Clear Visual Client Type & Fee Distinction */}
+                                    {/* Client Type & Verified Screenshot Proof Status */}
                                     <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-                                      {isEmergency ? (
+                                      {/* Emergency fee badge ONLY for emergency bookings */}
+                                      {isEmergency && (
                                         <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/30">
                                           <Zap className="w-2.5 h-2.5 fill-amber-300" />
                                           Instant Emergency • Fee: {feeDisplay}
                                         </span>
-                                      ) : (
-                                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-md border border-blue-500/30">
-                                          <ShieldCheck className="w-2.5 h-2.5" />
-                                          Enrolled Retainer Candidate • Fee: Included (₹0)
-                                        </span>
                                       )}
 
-                                      {/* Verified Screenshot Proof Status (24h retention) */}
+                                      {/* Combined Verified Screenshot ~ with view emoji button */}
                                       {slotProof.hasScreenshot ? (
-                                        <div className="flex items-center gap-1.5 flex-wrap">
-                                          <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded font-bold border border-emerald-500/30 flex items-center gap-1">
-                                            <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
-                                            Verified Invite ({slotProof.confidence || 95}%)
-                                          </span>
-                                          {slotProof.screenshotPreviewUrl && !slotProof.isExpired && (
-                                            <button
-                                              type="button"
-                                              onClick={() => setViewingProofSlot({ slot, proof: slotProof })}
-                                              className="text-[10px] text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 px-2 py-0.5 rounded font-bold border border-zinc-700 flex items-center gap-1 transition-colors cursor-pointer"
-                                              title="Inspect recruiter invite screenshot (24-hour retention)"
-                                            >
-                                              <Eye className="w-3 h-3 text-cyan-400" />
-                                              <span>View Invite (24h)</span>
-                                            </button>
-                                          )}
-                                          {slotProof.isExpired && (
-                                            <span className="text-[10px] text-zinc-500 font-mono">
-                                              (Proof purged after 24h)
+                                        slotProof.screenshotPreviewUrl && !slotProof.isExpired ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => setViewingProofSlot({ slot, proof: slotProof })}
+                                            className="text-[10px] text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 px-2 py-0.5 rounded-md font-bold border border-emerald-500/30 flex items-center gap-1 transition-colors cursor-pointer"
+                                            title="View verified screenshot"
+                                          >
+                                            <span>👁️ Verified Screenshot</span>
+                                            <span className="text-[9px] text-emerald-400/80 font-mono">
+                                              ({slotProof.confidence || 95}%)
                                             </span>
-                                          )}
-                                        </div>
+                                          </button>
+                                        ) : (
+                                          <span className="text-[10px] text-zinc-500 font-mono">
+                                            (Screenshot purged after 24h)
+                                          </span>
+                                        )
                                       ) : (
                                         <span className="text-[10px] text-amber-400/90 bg-amber-500/10 px-1.5 py-0.5 rounded font-bold border border-amber-500/30 inline-flex items-center gap-1">
                                           ⚠️ Unverified (No Screenshot Attached)
@@ -1497,12 +1486,12 @@ export default function MobileAdminCommandCenter() {
                                 {c.full_name}
                               </strong>
                               {c.client_type === 'per_round' ? (
-                                <span className="text-[10px] font-extrabold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30">
-                                  Emergency Per-Round
+                                <span className="text-[10px] font-extrabold text-amber-300 bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/30">
+                                  Instant
                                 </span>
                               ) : (
                                 <span className="text-[10px] font-extrabold text-blue-400 bg-blue-500/10 px-1.5 py-0.2 rounded border border-blue-500/30">
-                                  Retainer
+                                  Registered
                                 </span>
                               )}
                             </div>
@@ -1709,88 +1698,86 @@ export default function MobileAdminCommandCenter() {
               ) : (
                 <div className="divide-y divide-zinc-800">
                   {displayedLeads.map((l) => (
-                    <div key={l.id} className="py-3 first:pt-0 last:pb-0 space-y-2">
-                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2.5">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5 flex-wrap">
+                    <div key={l.id} className="py-2.5 first:pt-0 last:pb-0 space-y-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <strong className="text-xs font-extrabold text-white truncate">
                               {l.full_name}
                             </strong>
                             {l.status === 'Converted' && (
                               <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30 shrink-0">
-                                ✓ Enrolled Candidate
+                                ✓ Enrolled
                               </span>
                             )}
+                            <span className="text-[11px] text-zinc-400 truncate">• {l.tech_stack}</span>
                           </div>
-                          <span className="text-[11px] text-zinc-400 block truncate">{l.tech_stack}</span>
-                          <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-300 font-mono flex-wrap">
+                          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400 font-mono flex-wrap">
                             <span>CTC: {l.current_ctc_lpa} LPA</span>
                             <span>•</span>
                             <span>Notice: {l.notice_period}</span>
                             <span>•</span>
-                            <span className="text-zinc-400">{l.whatsapp_number}</span>
+                            <span className="text-zinc-300">{l.whatsapp_number}</span>
                           </div>
                         </div>
 
-                        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 flex-wrap">
+                        <div className="flex items-center gap-1.5 shrink-0">
                           {/* 1-Click Convert or Converted Indicator */}
                           {l.status === 'Converted' ? (
                             <button
                               type="button"
                               onClick={() => setActiveTab('clients')}
-                              className="inline-flex items-center gap-1 text-[10px] font-bold text-white bg-zinc-900 hover:bg-zinc-800 px-2.5 py-1 rounded-lg border border-zinc-700 transition-colors shadow-sm cursor-pointer shrink-0"
+                              className="inline-flex items-center gap-1 text-[10px] font-bold text-white bg-zinc-900 hover:bg-zinc-800 px-2 py-1 rounded-lg border border-zinc-700 transition-colors shadow-sm cursor-pointer"
                             >
-                              <span>View in Candidates</span>
+                              <span>View</span>
                               <ArrowRight className="w-2.5 h-2.5" />
                             </button>
                           ) : (
                             <button
                               type="button"
                               onClick={() => handleConvertLead(l)}
-                              className="inline-flex items-center gap-1 text-[11px] font-extrabold text-black bg-white hover:bg-zinc-200 px-3 py-1 rounded-lg transition-colors shadow-sm cursor-pointer shrink-0"
+                              className="inline-flex items-center gap-1 text-[10px] font-extrabold text-black bg-white hover:bg-zinc-200 px-2.5 py-1 rounded-lg transition-colors shadow-sm cursor-pointer"
                             >
                               <UserPlus className="w-3 h-3 text-black" />
-                              <span>Convert & Enroll</span>
+                              <span>Enroll</span>
                             </button>
                           )}
 
-                          <div className="flex items-center gap-1.5">
-                            {/* Note button */}
-                            <button
-                              type="button"
-                              title="Edit lead note"
-                              onClick={() => l.id && handleOpenNoteModal('lead', l.id, l.full_name, l.notes || '')}
-                              className={`p-1 rounded border transition-colors ${
-                                l.notes
-                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                                  : 'bg-zinc-900 text-zinc-400 hover:text-white border-zinc-800'
-                              }`}
-                            >
-                              <StickyNote className="w-3.5 h-3.5" />
-                            </button>
+                          {/* Note button */}
+                          <button
+                            type="button"
+                            title="Edit lead note"
+                            onClick={() => l.id && handleOpenNoteModal('lead', l.id, l.full_name, l.notes || '')}
+                            className={`p-1 rounded border transition-colors ${
+                              l.notes
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                                : 'bg-zinc-900 text-zinc-400 hover:text-white border-zinc-800'
+                            }`}
+                          >
+                            <StickyNote className="w-3.5 h-3.5" />
+                          </button>
 
-                            {/* Status Selector Dropdown */}
-                            <select
-                              value={l.status}
-                              onChange={(e) => l.id && handleUpdateLeadStatus(l.id, e.target.value)}
-                              className="text-[10px] font-mono font-bold bg-black border border-zinc-800 rounded px-1.5 py-0.5 text-white"
-                            >
-                              <option value="Pending Verification">Pending Verification</option>
-                              <option value="Called">Called</option>
-                              <option value="Diagnostic Scheduled">Diagnostic Scheduled</option>
-                              <option value="Converted">Converted</option>
-                            </select>
+                          {/* Status Selector Dropdown */}
+                          <select
+                            value={l.status}
+                            onChange={(e) => l.id && handleUpdateLeadStatus(l.id, e.target.value)}
+                            className="text-[10px] font-mono font-bold bg-black border border-zinc-800 rounded px-1.5 py-1 text-white"
+                          >
+                            <option value="Pending Verification">Pending Verification</option>
+                            <option value="Called">Called</option>
+                            <option value="Diagnostic Scheduled">Diagnostic Scheduled</option>
+                            <option value="Converted">Converted</option>
+                          </select>
 
-                            {/* Delete Lead */}
-                            <button
-                              type="button"
-                              title="Delete Lead"
-                              onClick={() => l.id && handleDeleteLead(l.id)}
-                              className="p-1 text-zinc-500 hover:text-red-400"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
+                          {/* Delete Lead */}
+                          <button
+                            type="button"
+                            title="Delete Lead"
+                            onClick={() => l.id && handleDeleteLead(l.id)}
+                            className="p-1 text-zinc-500 hover:text-red-400"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
 
@@ -1798,10 +1785,9 @@ export default function MobileAdminCommandCenter() {
                       {l.notes && (
                         <div
                           onClick={() => l.id && handleOpenNoteModal('lead', l.id, l.full_name, l.notes || '')}
-                          className="p-2 bg-black/60 border border-zinc-800 rounded-lg text-[11px] text-zinc-300 cursor-pointer hover:border-zinc-700 flex items-center justify-between"
+                          className="text-[10px] text-amber-300/90 bg-amber-500/5 border border-amber-500/20 px-2 py-0.5 rounded cursor-pointer truncate"
                         >
-                          <span className="italic line-clamp-1">"{l.notes}"</span>
-                          <Edit3 className="w-3 h-3 text-zinc-500 shrink-0 ml-1" />
+                          📝 {l.notes}
                         </div>
                       )}
                     </div>
@@ -2337,8 +2323,8 @@ export default function MobileAdminCommandCenter() {
                     }
                     className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
                   >
-                    <option value="full_package">Full Retainer Client</option>
-                    <option value="per_round">Emergency Per-Round</option>
+                    <option value="full_package">Registered Candidate</option>
+                    <option value="per_round">Instant Emergency</option>
                   </select>
                 </div>
               </div>

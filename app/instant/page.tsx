@@ -115,7 +115,48 @@ export default function InstantEmergencyBookingPage() {
     (s) => s.scheduled_date === selectedDate && s.status !== 'cancelled' && s.status !== 'declined'
   );
 
-  // Handle Real OCR Drop Invite Screenshot (24-Hour retention)
+  // Fast client-side image downscale (max 1200px) so upload & OCR complete in ~1 second
+  const resizeImageForOcr = async (file: File): Promise<Blob> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+        const maxDim = 1200;
+        let width = img.width;
+        let height = img.height;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(
+            (blob) => {
+              resolve(blob || file);
+            },
+            'image/jpeg',
+            0.85
+          );
+        } else {
+          resolve(file);
+        }
+      };
+      img.onerror = () => resolve(file);
+      img.src = objectUrl;
+    });
+  };
+
+  // Handle Real OCR Drop Invite Screenshot (Sub-second with warm worker)
   const handleDropInvite = async (file: File) => {
     if (!file || !file.type.startsWith('image/')) {
       setErrorMessage('Please select a valid image file (PNG, JPG, or WEBP).');
@@ -126,11 +167,13 @@ export default function InstantEmergencyBookingPage() {
     setInvitePreviewUrl(localUrl);
     setIsScanningInvite(true);
     setInviteVerified(false);
-    setScanStatusText('Scanning invitation text, schedule & recruiter details...');
+    setScanStatusText('Scanning screenshot for interview details & meeting links...');
 
     try {
+      // Downscale image client-side to ensure instant sub-second OCR
+      const optimizedBlob = await resizeImageForOcr(file);
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', optimizedBlob, file.name);
 
       const res = await fetch('/api/scan-invite', {
         method: 'POST',
@@ -177,20 +220,14 @@ export default function InstantEmergencyBookingPage() {
           }
         }
       } else {
+        // No interview details found in screenshot
         setInviteVerified(false);
-        setOcrData({
-          preview_data_url: json.screenshot_storage?.preview_data_url,
-          uploaded_at: json.screenshot_storage?.uploaded_at,
-          expires_at: json.screenshot_storage?.expires_at,
-          confidence: json.confidence || 40,
-          isGenuine: false,
-          verificationSignals: json.verificationSignals || [],
-          meetingLink: json.meetingLink,
-        });
+        setOcrData(null);
       }
     } catch (err) {
       console.error('Scan error:', err);
       setInviteVerified(false);
+      setOcrData(null);
     } finally {
       setIsScanningInvite(false);
       setScanStatusText(null);
@@ -388,11 +425,14 @@ export default function InstantEmergencyBookingPage() {
                   const proof = parseSlotProof(bookedSuccess.jd_text);
                   return proof.hasScreenshot ? (
                     <span className="text-emerald-400 font-bold font-sans flex items-center gap-1">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Verified Genuine Invite ({proof.confidence || 95}%)
+                      <span>👁️ Verified Screenshot</span>
+                      <span className="text-[10px] text-emerald-400/80 font-mono">
+                        ({proof.confidence || 95}%)
+                      </span>
                     </span>
                   ) : (
                     <span className="text-amber-400 font-bold font-sans">
-                      ⚠️ Unverified Invite (No Screenshot Attached)
+                      ⚠️ Unverified (No Screenshot Attached)
                     </span>
                   );
                 })()}
@@ -462,12 +502,12 @@ export default function InstantEmergencyBookingPage() {
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs font-bold text-zinc-300">
-                Interview Invite Screenshot (Optional)
+                Interview Invite Screenshot
               </label>
               <span className="text-[10px] text-zinc-400 font-medium">Non-mandatory</span>
             </div>
             <p className="text-[11px] text-zinc-400 mb-2 leading-relaxed">
-              Upload your recruiter email or calendar invite screenshot. Verified genuine invites are prioritized by emergency mentors and admin. Screenshots are kept for 24 hours for review, then auto-purged to save cloud space.
+              Upload your interview email or calendar screenshot to verify the round with mentors.
             </p>
 
             {!inviteFile ? (
@@ -493,7 +533,7 @@ export default function InstantEmergencyBookingPage() {
                 />
                 <Upload className="w-5 h-5 mx-auto mb-1.5 text-zinc-400" />
                 <strong className="block text-xs font-extrabold text-white">
-                  Drop invite screenshot here (Optional)
+                  Drop invite screenshot here
                 </strong>
                 <span className="block text-[11px] text-zinc-400 mt-0.5">
                   or tap to choose · Gmail, Outlook, Teams, Zoom, HackerRank
@@ -515,7 +555,7 @@ export default function InstantEmergencyBookingPage() {
                         {inviteFile.name}
                       </p>
                       <span className="text-[10px] text-zinc-400 font-mono">
-                        24-Hour retention
+                        Uploaded
                       </span>
                     </div>
                   </div>
@@ -531,23 +571,21 @@ export default function InstantEmergencyBookingPage() {
                 {isScanningInvite ? (
                   <div className="flex items-center gap-2 text-xs text-zinc-300 pt-2 border-t border-zinc-800">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                    <span>{scanStatusText || 'Running OCR scan on invite email & schedule...'}</span>
+                    <span>Scanning screenshot for interview details & meeting links...</span>
                   </div>
                 ) : inviteVerified ? (
                   <div className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-xl">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Genuine Recruiter Invite Verified ({ocrData?.confidence || 95}% match)</span>
+                    <span>Verified screenshot viewed by mentor</span>
                   </div>
-                ) : null}
+                ) : (
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 rounded-xl">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>No interview details found in screenshot</span>
+                  </div>
+                )}
               </div>
             )}
-
-            <div className="flex items-start gap-1.5 mt-2 text-[11px] text-zinc-400">
-              <ShieldCheck className="w-3.5 h-3.5 text-zinc-500 shrink-0 mt-0.5" />
-              <span>
-                Storage policy: Screenshots are stored for <strong>24 hours</strong> so admin can inspect and confirm genuineness, then automatically purged from the cloud database to save space.
-              </span>
-            </div>
           </div>
 
           {/* Candidate Form Fields */}
