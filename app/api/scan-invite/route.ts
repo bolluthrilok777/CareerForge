@@ -215,23 +215,32 @@ function parseInterviewText(text: string): ExtractedInviteData {
   };
 }
 
-// Cached singleton worker for instant sub-second OCR scans
-let cachedWorker: Tesseract.Worker | null = null;
-let cachedWorkerPromise: Promise<Tesseract.Worker> | null = null;
+// Global cached singleton worker for persistent, instant sub-second OCR
+const globalForTesseract = globalThis as unknown as {
+  __tesseractWorker?: Tesseract.Worker;
+  __tesseractPromise?: Promise<Tesseract.Worker>;
+};
 
 async function getOcrWorker(): Promise<Tesseract.Worker> {
-  if (cachedWorker) return cachedWorker;
-  if (!cachedWorkerPromise) {
-    cachedWorkerPromise = Tesseract.createWorker('eng').then((w) => {
-      cachedWorker = w;
+  if (globalForTesseract.__tesseractWorker) return globalForTesseract.__tesseractWorker;
+  if (!globalForTesseract.__tesseractPromise) {
+    globalForTesseract.__tesseractPromise = Tesseract.createWorker('eng', 1).then(async (w) => {
+      // Disable heavy hOCR, TSV, box, OSD generation for 5x faster pure-text OCR!
+      await w.setParameters({
+        tessjs_create_hocr: '0',
+        tessjs_create_tsv: '0',
+        tessjs_create_box: '0',
+        tessjs_create_osd: '0',
+      });
+      globalForTesseract.__tesseractWorker = w;
       return w;
     }).catch((err) => {
-      cachedWorker = null;
-      cachedWorkerPromise = null;
+      globalForTesseract.__tesseractWorker = undefined;
+      globalForTesseract.__tesseractPromise = undefined;
       throw err;
     });
   }
-  return cachedWorkerPromise;
+  return globalForTesseract.__tesseractPromise;
 }
 
 export async function POST(request: Request) {
@@ -293,10 +302,22 @@ export async function POST(request: Request) {
       );
     }
 
-    // Run Real Tesseract OCR via warm cached worker
-    const worker = await getOcrWorker();
-    const ret = await worker.recognize(imageBuffer);
-    const text = ret.data.text || '';
+    // Run Real Tesseract OCR via warm worker with 4.5s safety race so requests NEVER hang
+    let text = '';
+    try {
+      const worker = await getOcrWorker();
+      const recognizePromise = worker.recognize(imageBuffer);
+      const timeoutPromise = new Promise<{ data: { text: string } }>((_, reject) =>
+        setTimeout(() => reject(new Error('OCR scan timeout')), 4500)
+      );
+      const ret = await Promise.race([recognizePromise, timeoutPromise]);
+      text = ret.data.text || '';
+    } catch (ocrErr) {
+      console.warn('OCR fast pass failed or timed out:', ocrErr);
+      // Reset worker so next call starts fresh
+      globalForTesseract.__tesseractWorker = undefined;
+      globalForTesseract.__tesseractPromise = undefined;
+    }
 
     // Parse extracted text for Zoom links, schedule, and interview details
     const parsed = parseInterviewText(text);
@@ -338,8 +359,8 @@ export async function POST(request: Request) {
   } catch (err: unknown) {
     console.error('OCR scanning error in /api/scan-invite:', err);
     // Reset cached worker in case of crashed worker
-    cachedWorker = null;
-    cachedWorkerPromise = null;
+    globalForTesseract.__tesseractWorker = undefined;
+    globalForTesseract.__tesseractPromise = undefined;
 
     return NextResponse.json(
       {

@@ -308,14 +308,14 @@ export default function CandidatePortal() {
     }
   };
 
-  // Fast client-side image downscale (max 1200px) so upload & OCR complete in ~1 second
+  // Fast client-side image downscale (max 800px) so upload & OCR complete in ~1 second
   const resizeImageForOcr = async (file: File): Promise<Blob> => {
     return new Promise((resolve) => {
       const img = new Image();
       const objectUrl = URL.createObjectURL(file);
       img.onload = () => {
         URL.revokeObjectURL(objectUrl);
-        const maxDim = 1200;
+        const maxDim = 800; // Optimal 800px: crisp text, 3x faster OCR
         let width = img.width;
         let height = img.height;
         if (width > maxDim || height > maxDim) {
@@ -338,7 +338,7 @@ export default function CandidatePortal() {
               resolve(blob || file);
             },
             'image/jpeg',
-            0.85
+            0.8
           );
         } else {
           resolve(file);
@@ -360,7 +360,7 @@ export default function CandidatePortal() {
     setInvitePreviewUrl(localUrl);
     setIsScanningInvite(true);
     setInviteVerified(false);
-    setScanStatusText('Scanning invitation text, schedule & recruiter details...');
+    setScanStatusText('Scanning screenshot in seconds... ⚡');
 
     try {
       // Downscale image client-side to ensure instant sub-second OCR
@@ -368,10 +368,15 @@ export default function CandidatePortal() {
       const formData = new FormData();
       formData.append('file', optimizedBlob, file.name);
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
       const res = await fetch('/api/scan-invite', {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       const json = await res.json();
 

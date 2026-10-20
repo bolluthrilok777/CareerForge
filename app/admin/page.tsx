@@ -100,8 +100,10 @@ export default function MobileAdminCommandCenter() {
   const [resumeUrlInput, setResumeUrlInput] = useState('');
   const [isProcessingFile, setIsProcessingFile] = useState(false);
 
-  // Emergency / Per-Round Booking Modal State
+  // Emergency Slot Booking Modal State (Supports Registered Candidates & Single Round Instant)
   const [isEmergencyModalOpen, setIsEmergencyModalOpen] = useState(false);
+  const [emergencyBookingType, setEmergencyBookingType] = useState<'registered' | 'single_round'>('registered');
+  const [selectedRegisteredClientId, setSelectedRegisteredClientId] = useState<string>('');
   const [isEmergencyCustomRound, setIsEmergencyCustomRound] = useState(false);
   const [emergencyCustomRoundText, setEmergencyCustomRoundText] = useState('');
   const [emergencyForm, setEmergencyForm] = useState({
@@ -737,7 +739,7 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
-  // Emergency / Per-Round Booking Submission
+  // Emergency Slot Booking Submission (Handles Registered Candidates & Single Round Instant)
   const handleEmergencySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setEmergencyError(null);
@@ -746,17 +748,13 @@ export default function MobileAdminCommandCenter() {
       ? emergencyCustomRoundText.trim()
       : emergencyForm.round_type;
 
-    const cleanPhone = emergencyForm.whatsapp_number.replace(/\D/g, '');
-    if (cleanPhone.length < 10) {
-      setEmergencyError('Please enter a valid 10-digit WhatsApp number.');
-      return;
-    }
-    if (!emergencyForm.candidate_name.trim() || !emergencyForm.company_name.trim()) {
-      setEmergencyError('Candidate name and company name are required.');
-      return;
-    }
     if (isEmergencyCustomRound && !emergencyCustomRoundText.trim()) {
       setEmergencyError('Please enter the custom round type name.');
+      return;
+    }
+
+    if (!emergencyForm.company_name.trim()) {
+      setEmergencyError('Company name is required.');
       return;
     }
 
@@ -774,85 +772,153 @@ export default function MobileAdminCommandCenter() {
     setIsSubmittingEmergency(true);
 
     try {
-      let clientId = `cli-${Date.now()}`;
-      let createdClient: DatabaseClient;
-
-      const existingClient = clients.find(
-        (c) => c.whatsapp_number.replace(/\D/g, '') === cleanPhone
-      );
-
-      if (existingClient) {
-        clientId = existingClient.id;
-        createdClient = existingClient;
-        // Do NOT overwrite full_package client_type if candidate is an enrolled retainer candidate!
-      } else {
-        const clientPayload = {
-          full_name: emergencyForm.candidate_name.trim(),
-          whatsapp_number: cleanPhone,
-          tech_stack: `${effectiveRoundType} (Emergency Support)`,
-          target_ctc_lpa: '14.0',
-          fee_status: 'offer_locked' as const,
-          naukri_status: 'in_progress',
-          linkedin_status: 'in_progress',
-          client_type: 'per_round',
-          notes: `Agreed Round Fee: ${emergencyForm.round_fee} for ${emergencyForm.company_name.trim()}`,
-        };
-
-        const { data: insertedClient, error: clientErr } = await supabase
-          .from('clients')
-          .insert([clientPayload])
-          .select();
-
-        if (clientErr || !insertedClient || !insertedClient[0]) {
-          throw new Error(clientErr?.message || 'Failed to create client for emergency booking.');
+      if (emergencyBookingType === 'registered') {
+        if (!selectedRegisteredClientId) {
+          setEmergencyError('Please select a registered candidate.');
+          setIsSubmittingEmergency(false);
+          return;
         }
 
-        createdClient = insertedClient[0];
-        clientId = createdClient.id;
+        const registeredClient = clients.find((c) => c.id === selectedRegisteredClientId);
+        if (!registeredClient) {
+          setEmergencyError('Selected registered candidate could not be found.');
+          setIsSubmittingEmergency(false);
+          return;
+        }
+
+        const slotPayload = {
+          client_id: registeredClient.id,
+          company_name: emergencyForm.company_name.trim(),
+          round_type: effectiveRoundType,
+          scheduled_date: emergencyForm.scheduled_date,
+          scheduled_time: emergencyForm.scheduled_time,
+          status: 'approved' as const, // Instant approval because created by admin
+          round_fee: null, // Registered candidates have fee included (₹0) - never asked
+          jd_text: `[Emergency Slot for Registered Candidate] Priority Mentor Clearance`,
+        };
+
+        const { data: insertedSlot, error: slotErr } = await supabase
+          .from('interview_slots')
+          .insert([slotPayload])
+          .select('*, client:clients(*)');
+
+        if (slotErr || !insertedSlot || !insertedSlot[0]) {
+          throw new Error(slotErr?.message || 'Failed to reserve slot for registered candidate.');
+        }
+
+        const createdSlot: DatabaseInterviewSlot = insertedSlot[0];
+        setSlots((prev) => [createdSlot, ...prev]);
+        broadcastSync('SLOT_CREATED', createdSlot);
+
+        // Notify
+        triggerWhatsAppAlert('emergency_booking', {
+          name: registeredClient.full_name,
+          phone: registeredClient.whatsapp_number.replace(/\D/g, ''),
+          company_name: emergencyForm.company_name.trim(),
+          round_type: effectiveRoundType,
+          round_fee: 'Included (Registered)',
+          date: emergencyForm.scheduled_date,
+          time: emergencyForm.scheduled_time,
+        });
+
+        showToast(`⚡ Emergency slot approved for ${registeredClient.full_name}!`);
+      } else {
+        // Single Round (Instant Member)
+        const cleanPhone = emergencyForm.whatsapp_number.replace(/\D/g, '');
+        if (cleanPhone.length < 10) {
+          setEmergencyError('Please enter a valid 10-digit WhatsApp number.');
+          setIsSubmittingEmergency(false);
+          return;
+        }
+        if (!emergencyForm.candidate_name.trim()) {
+          setEmergencyError('Candidate name is required.');
+          setIsSubmittingEmergency(false);
+          return;
+        }
+
+        let clientId = `cli-${Date.now()}`;
+        let createdClient: DatabaseClient;
+
+        const existingClient = clients.find(
+          (c) => c.whatsapp_number.replace(/\D/g, '') === cleanPhone
+        );
+
+        if (existingClient) {
+          clientId = existingClient.id;
+          createdClient = existingClient;
+          if (existingClient.client_type !== 'full_package') {
+            await supabase
+              .from('clients')
+              .update({ client_type: 'per_round' })
+              .eq('id', clientId);
+          }
+        } else {
+          const clientPayload = {
+            full_name: emergencyForm.candidate_name.trim(),
+            whatsapp_number: cleanPhone,
+            tech_stack: `${effectiveRoundType} (Emergency Support)`,
+            target_ctc_lpa: '14.0',
+            fee_status: 'offer_locked' as const,
+            naukri_status: 'in_progress',
+            linkedin_status: 'in_progress',
+            client_type: 'per_round',
+            notes: `Agreed Round Fee: ${emergencyForm.round_fee} for ${emergencyForm.company_name.trim()}`,
+          };
+
+          const { data: insertedClient, error: clientErr } = await supabase
+            .from('clients')
+            .insert([clientPayload])
+            .select();
+
+          if (clientErr || !insertedClient || !insertedClient[0]) {
+            throw new Error(clientErr?.message || 'Failed to create client for instant booking.');
+          }
+
+          createdClient = insertedClient[0];
+          clientId = createdClient.id;
+          setClients((prev) => [createdClient, ...prev]);
+        }
+
+        const agreedFee = emergencyForm.round_fee.trim() || '₹3,000';
+        const slotPayload = {
+          client_id: clientId,
+          company_name: emergencyForm.company_name.trim(),
+          round_type: effectiveRoundType,
+          scheduled_date: emergencyForm.scheduled_date,
+          scheduled_time: emergencyForm.scheduled_time,
+          status: 'approved' as const,
+          round_fee: agreedFee,
+          jd_text: `[Emergency Per-Round Booking] Agreed Fee: ${agreedFee} | Priority Mentor Clearance`,
+        };
+
+        const { data: insertedSlot, error: slotErr } = await supabase
+          .from('interview_slots')
+          .insert([slotPayload])
+          .select('*, client:clients(*)');
+
+        if (slotErr || !insertedSlot || !insertedSlot[0]) {
+          throw new Error(slotErr?.message || 'Failed to reserve emergency single-round slot.');
+        }
+
+        const createdSlot: DatabaseInterviewSlot = insertedSlot[0];
+        setSlots((prev) => [createdSlot, ...prev]);
+        broadcastSync('SLOT_CREATED', createdSlot);
+
+        // Notify
+        triggerWhatsAppAlert('emergency_booking', {
+          name: emergencyForm.candidate_name.trim(),
+          phone: cleanPhone,
+          company_name: emergencyForm.company_name.trim(),
+          round_type: effectiveRoundType,
+          round_fee: agreedFee,
+          date: emergencyForm.scheduled_date,
+          time: emergencyForm.scheduled_time,
+        });
+
+        showToast(`⚡ Single-round slot approved for ${emergencyForm.candidate_name}!`);
       }
 
-      const agreedFee = emergencyForm.round_fee.trim() || '₹3,000';
-      const slotPayload = {
-        client_id: clientId,
-        company_name: emergencyForm.company_name.trim(),
-        round_type: effectiveRoundType,
-        scheduled_date: emergencyForm.scheduled_date,
-        scheduled_time: emergencyForm.scheduled_time,
-        status: 'approved' as const,
-        round_fee: agreedFee,
-        jd_text: `[Emergency Per-Round Booking] Agreed Fee: ${agreedFee} | Priority Mentor Clearance`,
-      };
-
-      const { data: insertedSlot, error: slotErr } = await supabase
-        .from('interview_slots')
-        .insert([slotPayload])
-        .select('*, client:clients(*)');
-
-      if (slotErr || !insertedSlot || !insertedSlot[0]) {
-        throw new Error(slotErr?.message || 'Failed to reserve emergency slot.');
-      }
-
-      const createdSlot: DatabaseInterviewSlot = insertedSlot[0];
-
-      setClients((prev) => [createdClient, ...prev.filter((c) => c.id !== createdClient.id)]);
-      setSlots((prev) => [createdSlot, ...prev]);
-
-      broadcastSync('SLOT_CREATED', createdSlot);
-
-      // Trigger official Meta WhatsApp Cloud API alert (non-blocking)
-      triggerWhatsAppAlert('emergency_booking', {
-        name: emergencyForm.candidate_name.trim(),
-        phone: cleanPhone,
-        company_name: emergencyForm.company_name.trim(),
-        round_type: effectiveRoundType,
-        round_fee: emergencyForm.round_fee,
-        date: emergencyForm.scheduled_date,
-        time: emergencyForm.scheduled_time,
-      });
-
-      showToast(`⚡ Emergency slot approved for ${emergencyForm.candidate_name}!`);
       setIsEmergencyModalOpen(false);
-
       setEmergencyForm({
         candidate_name: '',
         whatsapp_number: '',
@@ -862,6 +928,7 @@ export default function MobileAdminCommandCenter() {
         scheduled_date: '2026-10-21',
         scheduled_time: '02:30 PM IST',
       });
+      setSelectedRegisteredClientId('');
       setIsEmergencyCustomRound(false);
       setEmergencyCustomRoundText('');
     } catch (err: unknown) {
@@ -1122,7 +1189,7 @@ export default function MobileAdminCommandCenter() {
           className="w-full bg-emerald-500 hover:bg-emerald-400 active:scale-[0.98] text-black font-extrabold text-xs py-3 px-4 rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all border border-emerald-400/50 cursor-pointer"
         >
           <Zap className="w-4 h-4 fill-black" />
-          <span>+ Emergency / Per-Round Booking</span>
+          <span>+ Emergency Slot Booking (Registered / Single Round)</span>
         </button>
 
         {/* ======================================================== */}
@@ -1563,67 +1630,69 @@ export default function MobileAdminCommandCenter() {
                           </div>
                         )}
 
-                        {/* Controls Matrix */}
-                        <div className="grid grid-cols-3 gap-2 pt-1 border-t border-zinc-800/80">
-                          {/* Control 1: Job Profiles */}
-                          <button
-                            type="button"
-                            onClick={() => handleToggleProfilesStatus(c.id)}
-                            className="text-left bg-black border border-zinc-800 p-2 rounded-xl transition-colors hover:border-zinc-700"
-                          >
-                            <span className="block text-[9px] font-mono uppercase text-zinc-400 font-bold">
-                              Job Profiles
-                            </span>
-                            <span
-                              className={`inline-block text-[11px] font-extrabold mt-0.5 ${
-                                profilesStatus === 'Optimized'
-                                  ? 'text-emerald-400'
-                                  : 'text-amber-400'
-                              }`}
+                        {/* Controls Matrix - Only for Registered Candidates */}
+                        {c.client_type !== 'per_round' && (
+                          <div className="grid grid-cols-3 gap-2 pt-1 border-t border-zinc-800/80">
+                            {/* Control 1: Job Profiles */}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleProfilesStatus(c.id)}
+                              className="text-left bg-black border border-zinc-800 p-2 rounded-xl transition-colors hover:border-zinc-700"
                             >
-                              {profilesStatus === 'Optimized' ? 'Optimized ✅' : 'In Progress ⏳'}
-                            </span>
-                          </button>
+                              <span className="block text-[9px] font-mono uppercase text-zinc-400 font-bold">
+                                Job Profiles
+                              </span>
+                              <span
+                                className={`inline-block text-[11px] font-extrabold mt-0.5 ${
+                                  profilesStatus === 'Optimized'
+                                    ? 'text-emerald-400'
+                                    : 'text-amber-400'
+                                }`}
+                              >
+                                {profilesStatus === 'Optimized' ? 'Optimized ✅' : 'In Progress ⏳'}
+                              </span>
+                            </button>
 
-                          {/* Control 2: ATS Verified Resume */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingResumeClient(c);
-                              setResumeUrlInput(c.resume_url || '');
-                            }}
-                            className="text-left bg-black border border-zinc-800 p-2 rounded-xl transition-colors hover:border-zinc-700"
-                          >
-                            <span className="block text-[9px] font-mono uppercase text-zinc-400 font-bold">
-                              Master Resume
-                            </span>
-                            <span
-                              className={`inline-block text-[11px] font-extrabold mt-0.5 ${
-                                c.resume_url ? 'text-emerald-400' : 'text-amber-400'
-                              }`}
+                            {/* Control 2: ATS Verified Resume */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingResumeClient(c);
+                                setResumeUrlInput(c.resume_url || '');
+                              }}
+                              className="text-left bg-black border border-zinc-800 p-2 rounded-xl transition-colors hover:border-zinc-700"
                             >
-                              {c.resume_url ? 'ATS Verified 📄' : '+ Add PDF'}
-                            </span>
-                          </button>
+                              <span className="block text-[9px] font-mono uppercase text-zinc-400 font-bold">
+                                Master Resume
+                              </span>
+                              <span
+                                className={`inline-block text-[11px] font-extrabold mt-0.5 ${
+                                  c.resume_url ? 'text-emerald-400' : 'text-amber-400'
+                                }`}
+                              >
+                                {c.resume_url ? 'ATS Verified 📄' : '+ Add PDF'}
+                              </span>
+                            </button>
 
-                          {/* Control 3: Fee Milestone (NO AMOUNTS) */}
-                          <button
-                            type="button"
-                            onClick={() => handleCycleFeeStatus(c.id)}
-                            className="text-left bg-black border border-zinc-800 p-2 rounded-xl transition-colors hover:border-zinc-700"
-                          >
-                            <span className="block text-[9px] font-mono uppercase text-zinc-400 font-bold">
-                              Milestone
-                            </span>
-                            <span className="inline-block text-[11px] font-extrabold mt-0.5 text-white truncate">
-                              {c.fee_status === 'registration_paid_20k'
-                                ? 'Registration Verified'
-                                : c.fee_status === 'offer_locked'
-                                ? 'Offer Locked'
-                                : 'Cleared'}
-                            </span>
-                          </button>
-                        </div>
+                            {/* Control 3: Fee Milestone (NO AMOUNTS) */}
+                            <button
+                              type="button"
+                              onClick={() => handleCycleFeeStatus(c.id)}
+                              className="text-left bg-black border border-zinc-800 p-2 rounded-xl transition-colors hover:border-zinc-700"
+                            >
+                              <span className="block text-[9px] font-mono uppercase text-zinc-400 font-bold">
+                                Milestone
+                              </span>
+                              <span className="inline-block text-[11px] font-extrabold mt-0.5 text-white truncate">
+                                {c.fee_status === 'registration_paid_20k'
+                                  ? 'Registration Verified'
+                                  : c.fee_status === 'offer_locked'
+                                  ? 'Offer Locked'
+                                  : 'Cleared'}
+                              </span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -1947,10 +2016,10 @@ export default function MobileAdminCommandCenter() {
                 </div>
                 <div>
                   <h3 className="text-sm font-extrabold text-white">
-                    Emergency / Per-Round Booking
+                    Emergency Slot Booking
                   </h3>
                   <p className="text-[11px] text-zinc-400">
-                    Single urgent interview round • Clash-protected
+                    Instant slot reservation • Clash-protected
                   </p>
                 </div>
               </div>
@@ -1963,6 +2032,40 @@ export default function MobileAdminCommandCenter() {
               </button>
             </div>
 
+            {/* 2 Options: Registered vs Single Round */}
+            <div className="flex p-1 bg-black border border-zinc-800 rounded-2xl gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setEmergencyBookingType('registered');
+                  setEmergencyError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  emergencyBookingType === 'registered'
+                    ? 'bg-white text-black shadow-sm font-extrabold'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Registered</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEmergencyBookingType('single_round');
+                  setEmergencyError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  emergencyBookingType === 'single_round'
+                    ? 'bg-amber-400 text-black shadow-sm font-extrabold'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 fill-current" />
+                <span>Single Round</span>
+              </button>
+            </div>
+
             {emergencyError && (
               <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
@@ -1971,131 +2074,235 @@ export default function MobileAdminCommandCenter() {
             )}
 
             <form onSubmit={handleEmergencySubmit} className="space-y-3.5">
-              {/* Candidate Name & WhatsApp */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Candidate Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={emergencyForm.candidate_name}
-                    onChange={(e) =>
-                      setEmergencyForm({ ...emergencyForm, candidate_name: e.target.value })
-                    }
-                    placeholder="e.g. Ramesh Varma"
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    WhatsApp Number *
-                  </label>
-                  <input
-                    type="tel"
-                    required
-                    value={emergencyForm.whatsapp_number}
-                    onChange={(e) =>
-                      setEmergencyForm({ ...emergencyForm, whatsapp_number: e.target.value })
-                    }
-                    placeholder="e.g. 9876543210"
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {/* Company & Round Type */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Company Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={emergencyForm.company_name}
-                    onChange={(e) =>
-                      setEmergencyForm({ ...emergencyForm, company_name: e.target.value })
-                    }
-                    placeholder="e.g. Oracle, Swiggy"
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Round Type *
-                  </label>
-                  <select
-                    value={isEmergencyCustomRound ? 'Custom' : emergencyForm.round_type}
-                    onChange={(e) => {
-                      if (e.target.value === 'Custom') {
-                        setIsEmergencyCustomRound(true);
-                      } else {
-                        setIsEmergencyCustomRound(false);
-                        setEmergencyForm({ ...emergencyForm, round_type: e.target.value });
-                      }
-                    }}
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
-                  >
-                    <option value="Technical Coding L1">Technical Coding L1</option>
-                    <option value="System Design L2">System Design L2</option>
-                    <option value="Screening Round">Screening Round</option>
-                    <option value="Hiring Manager L3">Hiring Manager L3</option>
-                    <option value="HR Discussion">HR Discussion</option>
-                    <option value="Custom">Custom (Enter manually)...</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Custom Round Type Input if selected */}
-              {isEmergencyCustomRound && (
-                <div>
-                  <label className="block text-[11px] font-bold text-emerald-400 mb-1">
-                    Custom Round Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={emergencyCustomRoundText}
-                    onChange={(e) => setEmergencyCustomRoundText(e.target.value)}
-                    placeholder="e.g. Director Round, Assignment Review, Live Architecture"
-                    className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
-                  />
-                </div>
-              )}
-
-              {/* Agreed Round Fee */}
-              <div>
-                <label className="block text-xs font-bold text-zinc-300 mb-1">
-                  Agreed Round Fee *
-                </label>
-                <div className="flex gap-2 mb-2">
-                  {['₹3,000', '₹4,000', '₹5,000', '₹6,000'].map((fee) => (
-                    <button
-                      key={fee}
-                      type="button"
-                      onClick={() => setEmergencyForm({ ...emergencyForm, round_fee: fee })}
-                      className={`flex-1 py-1.5 px-2 text-xs font-mono font-bold rounded-xl border text-center transition-colors ${
-                        emergencyForm.round_fee === fee
-                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
-                          : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
-                      }`}
+              {/* REGISTERED CANDIDATE FLOW (NO FEE ASKED) */}
+              {emergencyBookingType === 'registered' ? (
+                <>
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-300 mb-1">
+                      Select Registered Candidate *
+                    </label>
+                    <select
+                      required
+                      value={selectedRegisteredClientId}
+                      onChange={(e) => {
+                        setSelectedRegisteredClientId(e.target.value);
+                        const found = clients.find((c) => c.id === e.target.value);
+                        if (found) {
+                          setEmergencyForm((prev) => ({
+                            ...prev,
+                            candidate_name: found.full_name,
+                            whatsapp_number: found.whatsapp_number,
+                          }));
+                        }
+                      }}
+                      className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
                     >
-                      {fee}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="text"
-                  value={emergencyForm.round_fee}
-                  onChange={(e) =>
-                    setEmergencyForm({ ...emergencyForm, round_fee: e.target.value })
-                  }
-                  placeholder="Custom fee, e.g. ₹4,500"
-                  className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
-                />
-              </div>
+                      <option value="">-- Choose registered candidate --</option>
+                      {clients
+                        .filter((c) => c.client_type !== 'per_round')
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.full_name} ({c.whatsapp_number})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-[11px] text-blue-300 flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-blue-400 shrink-0" />
+                    <span>Fee is included (₹0). Instantly approved by Admin.</span>
+                  </div>
+
+                  {/* Company & Round Type for Registered */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-300 mb-1">
+                        Company Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={emergencyForm.company_name}
+                        onChange={(e) =>
+                          setEmergencyForm({ ...emergencyForm, company_name: e.target.value })
+                        }
+                        placeholder="e.g. Oracle, Swiggy"
+                        className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-300 mb-1">
+                        Round Type *
+                      </label>
+                      <select
+                        value={isEmergencyCustomRound ? 'Custom' : emergencyForm.round_type}
+                        onChange={(e) => {
+                          if (e.target.value === 'Custom') {
+                            setIsEmergencyCustomRound(true);
+                          } else {
+                            setIsEmergencyCustomRound(false);
+                            setEmergencyForm({ ...emergencyForm, round_type: e.target.value });
+                          }
+                        }}
+                        className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                      >
+                        <option value="Technical Coding L1">Technical Coding L1</option>
+                        <option value="System Design L2">System Design L2</option>
+                        <option value="Screening Round">Screening Round</option>
+                        <option value="Hiring Manager L3">Hiring Manager L3</option>
+                        <option value="HR Discussion">HR Discussion</option>
+                        <option value="Custom">Custom (Enter manually)...</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Custom Round Type Input if selected */}
+                  {isEmergencyCustomRound && (
+                    <div>
+                      <label className="block text-[11px] font-bold text-emerald-400 mb-1">
+                        Custom Round Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={emergencyCustomRoundText}
+                        onChange={(e) => setEmergencyCustomRoundText(e.target.value)}
+                        placeholder="e.g. Director Round, Assignment Review, Live Architecture"
+                        className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
+                      />
+                    </div>
+                  )}
+                </>
+              ) : (
+                /* SINGLE ROUND (INSTANT) FLOW */
+                <>
+                  {/* Candidate Name & WhatsApp */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-300 mb-1">
+                        Candidate Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={emergencyForm.candidate_name}
+                        onChange={(e) =>
+                          setEmergencyForm({ ...emergencyForm, candidate_name: e.target.value })
+                        }
+                        placeholder="e.g. Ramesh Varma"
+                        className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-300 mb-1">
+                        WhatsApp Number *
+                      </label>
+                      <input
+                        type="tel"
+                        required
+                        value={emergencyForm.whatsapp_number}
+                        onChange={(e) =>
+                          setEmergencyForm({ ...emergencyForm, whatsapp_number: e.target.value })
+                        }
+                        placeholder="e.g. 9876543210"
+                        className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Company & Round Type */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-300 mb-1">
+                        Company Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={emergencyForm.company_name}
+                        onChange={(e) =>
+                          setEmergencyForm({ ...emergencyForm, company_name: e.target.value })
+                        }
+                        placeholder="e.g. Oracle, Swiggy"
+                        className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-300 mb-1">
+                        Round Type *
+                      </label>
+                      <select
+                        value={isEmergencyCustomRound ? 'Custom' : emergencyForm.round_type}
+                        onChange={(e) => {
+                          if (e.target.value === 'Custom') {
+                            setIsEmergencyCustomRound(true);
+                          } else {
+                            setIsEmergencyCustomRound(false);
+                            setEmergencyForm({ ...emergencyForm, round_type: e.target.value });
+                          }
+                        }}
+                        className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                      >
+                        <option value="Technical Coding L1">Technical Coding L1</option>
+                        <option value="System Design L2">System Design L2</option>
+                        <option value="Screening Round">Screening Round</option>
+                        <option value="Hiring Manager L3">Hiring Manager L3</option>
+                        <option value="HR Discussion">HR Discussion</option>
+                        <option value="Custom">Custom (Enter manually)...</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Custom Round Type Input if selected */}
+                  {isEmergencyCustomRound && (
+                    <div>
+                      <label className="block text-[11px] font-bold text-emerald-400 mb-1">
+                        Custom Round Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={emergencyCustomRoundText}
+                        onChange={(e) => setEmergencyCustomRoundText(e.target.value)}
+                        placeholder="e.g. Director Round, Assignment Review, Live Architecture"
+                        className="w-full bg-black border border-emerald-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-emerald-400 focus:outline-none"
+                      />
+                    </div>
+                  )}
+
+                  {/* Agreed Round Fee */}
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-300 mb-1">
+                      Agreed Round Fee *
+                    </label>
+                    <div className="flex gap-2 mb-2">
+                      {['₹3,000', '₹4,000', '₹5,000', '₹6,000'].map((fee) => (
+                        <button
+                          key={fee}
+                          type="button"
+                          onClick={() => setEmergencyForm({ ...emergencyForm, round_fee: fee })}
+                          className={`flex-1 py-1.5 px-2 text-xs font-mono font-bold rounded-xl border text-center transition-colors cursor-pointer ${
+                            emergencyForm.round_fee === fee
+                              ? 'bg-amber-400/20 text-amber-300 border-amber-400/50'
+                              : 'bg-black border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          {fee}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      value={emergencyForm.round_fee}
+                      onChange={(e) =>
+                        setEmergencyForm({ ...emergencyForm, round_fee: e.target.value })
+                      }
+                      placeholder="Custom fee, e.g. ₹4,500"
+                      className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                    />
+                  </div>
+                </>
+              )}
 
               {/* Date Selection */}
               <div>
@@ -2329,40 +2536,42 @@ export default function MobileAdminCommandCenter() {
                 </div>
               </div>
 
-              {/* Milestone & Profiles Status */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Fee Status Milestone
-                  </label>
-                  <select
-                    value={editClientForm.fee_status}
-                    onChange={(e) =>
-                      setEditClientForm({ ...editClientForm, fee_status: e.target.value })
-                    }
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
-                  >
-                    <option value="registration_paid_20k">Registration Paid</option>
-                    <option value="offer_locked">Offer Stage Locked</option>
-                    <option value="final_12_percent_paid">Final 12% Settled</option>
-                  </select>
+              {/* Milestone & Profiles Status - Only for Registered Candidates */}
+              {editClientForm.client_type !== 'per_round' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-300 mb-1">
+                      Fee Status Milestone
+                    </label>
+                    <select
+                      value={editClientForm.fee_status}
+                      onChange={(e) =>
+                        setEditClientForm({ ...editClientForm, fee_status: e.target.value })
+                      }
+                      className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                    >
+                      <option value="registration_paid_20k">Registration Paid</option>
+                      <option value="offer_locked">Offer Stage Locked</option>
+                      <option value="final_12_percent_paid">Final 12% Settled</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-300 mb-1">
+                      Job Profiles Status
+                    </label>
+                    <select
+                      value={editClientForm.naukri_status}
+                      onChange={(e) =>
+                        setEditClientForm({ ...editClientForm, naukri_status: e.target.value })
+                      }
+                      className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
+                    >
+                      <option value="in_progress">In Progress</option>
+                      <option value="Optimized">Optimized</option>
+                    </select>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-300 mb-1">
-                    Job Profiles Status
-                  </label>
-                  <select
-                    value={editClientForm.naukri_status}
-                    onChange={(e) =>
-                      setEditClientForm({ ...editClientForm, naukri_status: e.target.value })
-                    }
-                    className="w-full bg-black border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:border-zinc-500 focus:outline-none"
-                  >
-                    <option value="in_progress">In Progress</option>
-                    <option value="Optimized">Optimized</option>
-                  </select>
-                </div>
-              </div>
+              )}
 
               {/* Operational Notes */}
               <div>
