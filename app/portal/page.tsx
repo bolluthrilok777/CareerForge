@@ -969,25 +969,30 @@ export default function CandidatePortal() {
                             <Edit3 className="w-3 h-3 text-zinc-400" />
                             <span>Reschedule</span>
                           </button>
-                          <span
-                            className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 text-center ${
-                              slot.status === 'approved'
-                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                                : slot.status === 'declined'
-                                ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                                : slot.status === 'rescheduled'
-                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                                : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                            }`}
-                          >
-                            {slot.status === 'approved'
-                              ? 'Approved'
-                              : slot.status === 'declined'
-                              ? 'Declined'
-                              : slot.status === 'rescheduled'
-                              ? 'Rescheduled (Pending)'
-                              : 'Pending Approval'}
-                          </span>
+                          {(() => {
+                            const isSlotDeclined = slot.status === 'declined' || slot.status === 'cancelled';
+                            return (
+                              <span
+                                className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 text-center ${
+                                  slot.status === 'approved'
+                                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                                    : isSlotDeclined
+                                    ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                                    : slot.status === 'rescheduled'
+                                    ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                                    : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                                }`}
+                              >
+                                {slot.status === 'approved'
+                                  ? 'Approved'
+                                  : isSlotDeclined
+                                  ? 'Declined'
+                                  : slot.status === 'rescheduled'
+                                  ? 'Rescheduled (Pending)'
+                                  : 'Pending Approval'}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </div>
 
@@ -1008,7 +1013,7 @@ export default function CandidatePortal() {
                         </div>
                       )}
 
-                      {slot.status === 'declined' && (
+                      {(slot.status === 'declined' || slot.status === 'cancelled') && (
                         <div className="flex items-center gap-2 text-xs text-red-300 bg-red-500/10 p-2.5 rounded-xl border border-red-500/20">
                           <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
                           <span>Slot was declined by mentor/admin. Click Reschedule to select an alternate time.</span>

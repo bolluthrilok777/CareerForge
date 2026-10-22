@@ -611,15 +611,16 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
-  // Slots Management: 3-State Cycle (requested -> approved -> declined -> requested)
+  // Slots Management: 3-State Cycle (requested -> approved -> declined/cancelled -> requested)
   const handleToggleSlotStatus = async (slotId: string) => {
     const slot = slots.find((s) => s.id === slotId);
     if (!slot) return;
 
     let nextStatus: DatabaseInterviewSlot['status'] = 'approved';
+    const isCurrentlyDeclined = slot.status === 'declined' || slot.status === 'cancelled';
     if (slot.status === 'approved') {
-      nextStatus = 'declined';
-    } else if (slot.status === 'declined') {
+      nextStatus = 'cancelled'; // Saved as 'cancelled' in Postgres to satisfy interview_slots_status_check
+    } else if (isCurrentlyDeclined) {
       nextStatus = 'requested';
     } else {
       nextStatus = 'approved';
@@ -653,7 +654,7 @@ export default function MobileAdminCommandCenter() {
       showToast(
         nextStatus === 'approved'
           ? 'Slot approved (Live in cohort)'
-          : nextStatus === 'declined'
+          : nextStatus === 'cancelled'
           ? 'Slot declined'
           : 'Slot reset to pending approval'
       );
@@ -663,15 +664,16 @@ export default function MobileAdminCommandCenter() {
         prev.map((s) => (s.id === slotId ? { ...s, status: nextStatus } : s))
       );
       broadcastSync('SLOT_UPDATED', { slotId, status: nextStatus });
-      showToast(`Slot status: ${nextStatus}`);
+      showToast(nextStatus === 'cancelled' ? 'Slot declined' : `Slot status: ${nextStatus}`);
     }
   };
 
   const handleSetSlotStatus = async (slotId: string, newStatus: DatabaseInterviewSlot['status']) => {
+    const dbStatus = newStatus === 'declined' ? 'cancelled' : newStatus;
     try {
       const { data, error } = await supabase
         .from('interview_slots')
-        .update({ status: newStatus })
+        .update({ status: dbStatus })
         .eq('id', slotId)
         .select('*, client:clients(*)');
 
@@ -684,10 +686,10 @@ export default function MobileAdminCommandCenter() {
       const updated = data && data[0] ? data[0] : null;
 
       setSlots((prev) =>
-        prev.map((s) => (s.id === slotId ? (updated ? { ...s, ...updated } : { ...s, status: newStatus }) : s))
+        prev.map((s) => (s.id === slotId ? (updated ? { ...s, ...updated } : { ...s, status: dbStatus }) : s))
       );
-      broadcastSync('SLOT_UPDATED', { slotId, status: newStatus });
-      showToast(`Slot status updated to ${newStatus}`);
+      broadcastSync('SLOT_UPDATED', { slotId, status: dbStatus });
+      showToast(dbStatus === 'cancelled' ? 'Slot declined' : `Slot status updated to ${dbStatus}`);
     } catch (err: unknown) {
       console.error('Network error setting slot status:', err);
       showToast('Error updating slot status in database.');
@@ -762,13 +764,14 @@ export default function MobileAdminCommandCenter() {
 
     setIsSavingSlotEdit(true);
     try {
+      const dbStatus = editSlotForm.status === 'declined' ? 'cancelled' : editSlotForm.status;
       const updatePayload = {
         company_name: editSlotForm.company_name.trim(),
         round_type: effectiveRoundType,
         scheduled_date: editSlotForm.scheduled_date,
         scheduled_time: editSlotForm.scheduled_time,
         meeting_link: editSlotForm.meeting_link.trim() || null,
-        status: editSlotForm.status,
+        status: dbStatus,
         round_fee: editSlotForm.round_fee.trim() || null,
         jd_text: editSlotForm.jd_text.trim() || null,
       };
@@ -1543,41 +1546,46 @@ export default function MobileAdminCommandCenter() {
                                       </button>
 
                                       {/* 3-State Status Toggle: Approve -> Approved -> Declined -> Approve */}
-                                      <button
-                                        type="button"
-                                        onClick={() => handleToggleSlotStatus(slot.id)}
-                                        title={
-                                          slot.status === 'approved'
-                                            ? 'Currently Approved. Click to change to Declined.'
-                                            : slot.status === 'declined'
-                                            ? 'Currently Declined. Click to change to Approve.'
-                                            : 'Click to Approve.'
-                                        }
-                                        className={`px-2.5 py-1 rounded-md text-[10px] font-extrabold flex items-center gap-1 transition-all cursor-pointer border ${
-                                          slot.status === 'approved'
-                                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25'
-                                            : slot.status === 'declined'
-                                            ? 'bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25'
-                                            : 'bg-emerald-500 text-black border-transparent hover:bg-emerald-400 shadow-xs'
-                                        }`}
-                                      >
-                                        {slot.status === 'approved' ? (
-                                          <>
-                                            <Check className="w-3 h-3 stroke-[3]" />
-                                            <span>Approved</span>
-                                          </>
-                                        ) : slot.status === 'declined' ? (
-                                          <>
-                                            <X className="w-3 h-3 stroke-[2.5]" />
-                                            <span>Declined</span>
-                                          </>
-                                        ) : (
-                                          <>
-                                            <Check className="w-3 h-3 stroke-[3]" />
-                                            <span>Approve</span>
-                                          </>
-                                        )}
-                                      </button>
+                                      {(() => {
+                                        const isDeclined = slot.status === 'declined' || slot.status === 'cancelled';
+                                        return (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleToggleSlotStatus(slot.id)}
+                                            title={
+                                              slot.status === 'approved'
+                                                ? 'Currently Approved. Click to change to Declined.'
+                                                : isDeclined
+                                                ? 'Currently Declined. Click to change to Approve.'
+                                                : 'Click to Approve.'
+                                            }
+                                            className={`px-2.5 py-1 rounded-md text-[10px] font-extrabold flex items-center gap-1 transition-all cursor-pointer border ${
+                                              slot.status === 'approved'
+                                                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25'
+                                                : isDeclined
+                                                ? 'bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25'
+                                                : 'bg-emerald-500 text-black border-transparent hover:bg-emerald-400 shadow-xs'
+                                            }`}
+                                          >
+                                            {slot.status === 'approved' ? (
+                                              <>
+                                                <Check className="w-3 h-3 stroke-[3]" />
+                                                <span>Approved</span>
+                                              </>
+                                            ) : isDeclined ? (
+                                              <>
+                                                <X className="w-3 h-3 stroke-[2.5]" />
+                                                <span>Declined</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Check className="w-3 h-3 stroke-[3]" />
+                                                <span>Approve</span>
+                                              </>
+                                            )}
+                                          </button>
+                                        );
+                                      })()}
                                     </div>
                                   </div>
                                 </div>
