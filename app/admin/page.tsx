@@ -40,20 +40,7 @@ import {
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
 import { parseSlotProof, SlotProofMetadata } from '@/lib/inviteProof';
-
-function getUpcomingAdminDates(): { dateStr: string; label: string; dayName: string }[] {
-  const dates = [];
-  const base = new Date('2026-10-19T12:00:00Z');
-  for (let i = 0; i < 10; i++) {
-    const d = new Date(base);
-    d.setDate(base.getDate() + i);
-    const dateStr = d.toISOString().split('T')[0];
-    const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-    const label = d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
-    dates.push({ dateStr, label, dayName });
-  }
-  return dates;
-}
+import { getUpcomingDates, getTodayDateStr, DEFAULT_SLOT_TIME, useLiveUpcomingDates } from '@/lib/dates';
 
 // Initial Empty States for Production
 const INITIAL_MOCK_LEADS: DatabaseLead[] = [];
@@ -106,14 +93,16 @@ export default function MobileAdminCommandCenter() {
   const [selectedRegisteredClientId, setSelectedRegisteredClientId] = useState<string>('');
   const [isEmergencyCustomRound, setIsEmergencyCustomRound] = useState(false);
   const [emergencyCustomRoundText, setEmergencyCustomRoundText] = useState('');
+  const { upcomingDates, todayStr } = useLiveUpcomingDates();
+
   const [emergencyForm, setEmergencyForm] = useState({
     candidate_name: '',
     whatsapp_number: '',
     company_name: '',
     round_type: 'Technical Coding L1',
     round_fee: '₹3,000',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '02:30 PM IST',
+    scheduled_date: '',
+    scheduled_time: DEFAULT_SLOT_TIME,
   });
   const [isSubmittingEmergency, setIsSubmittingEmergency] = useState(false);
   const [emergencyError, setEmergencyError] = useState<string | null>(null);
@@ -137,13 +126,20 @@ export default function MobileAdminCommandCenter() {
   const [editSlotForm, setEditSlotForm] = useState({
     company_name: '',
     round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '02:30 PM IST',
+    scheduled_date: '',
+    scheduled_time: DEFAULT_SLOT_TIME,
     meeting_link: '',
     status: 'requested' as DatabaseInterviewSlot['status'],
     round_fee: '',
     jd_text: '',
   });
+
+  useEffect(() => {
+    if (todayStr) {
+      setEmergencyForm((prev) => (prev.scheduled_date ? prev : { ...prev, scheduled_date: todayStr }));
+      setEditSlotForm((prev) => (prev.scheduled_date ? prev : { ...prev, scheduled_date: todayStr }));
+    }
+  }, [todayStr]);
   const [isEditSlotCustomRound, setIsEditSlotCustomRound] = useState(false);
   const [editSlotCustomRoundText, setEditSlotCustomRoundText] = useState('');
   const [isSavingSlotEdit, setIsSavingSlotEdit] = useState(false);
@@ -211,7 +207,33 @@ export default function MobileAdminCommandCenter() {
   useEffect(() => {
     fetchAllData();
 
-    // Listen to real-time sync
+    // 1. Supabase Postgres Realtime Subscription for cross-device & instant sync
+    const realtimeChannel = supabase
+      .channel('admin_realtime_sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'interview_slots' },
+        () => {
+          fetchAllData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'clients' },
+        () => {
+          fetchAllData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'candidate_leads' },
+        () => {
+          fetchAllData();
+        }
+      )
+      .subscribe();
+
+    // 2. Listen to cross-tab BroadcastChannel sync
     const unsubscribe = subscribeToSync((msg) => {
       fetchAllData();
       if (msg.type === 'SLOT_CREATED') {
@@ -222,6 +244,7 @@ export default function MobileAdminCommandCenter() {
     });
 
     return () => {
+      supabase.removeChannel(realtimeChannel);
       unsubscribe();
     };
   }, []);
@@ -618,21 +641,28 @@ export default function MobileAdminCommandCenter() {
 
   const handleSetSlotStatus = async (slotId: string, newStatus: DatabaseInterviewSlot['status']) => {
     try {
-      await supabase
+      const { data, error } = await supabase
         .from('interview_slots')
         .update({ status: newStatus })
-        .eq('id', slotId);
+        .eq('id', slotId)
+        .select('*, client:clients(*)');
+
+      if (error) {
+        console.error('Error updating slot status:', error);
+        showToast(`Failed to update status: ${error.message}`);
+        return;
+      }
+
+      const updated = data && data[0] ? data[0] : null;
 
       setSlots((prev) =>
-        prev.map((s) => (s.id === slotId ? { ...s, status: newStatus } : s))
+        prev.map((s) => (s.id === slotId ? (updated ? { ...s, ...updated } : { ...s, status: newStatus }) : s))
       );
       broadcastSync('SLOT_UPDATED', { slotId, status: newStatus });
-      showToast(`Slot marked as ${newStatus}`);
-    } catch {
-      setSlots((prev) =>
-        prev.map((s) => (s.id === slotId ? { ...s, status: newStatus } : s))
-      );
-      showToast(`Slot marked as ${newStatus}`);
+      showToast(`Slot status updated to ${newStatus}`);
+    } catch (err: unknown) {
+      console.error('Network error setting slot status:', err);
+      showToast('Error updating slot status in database.');
     }
   };
 
@@ -664,8 +694,8 @@ export default function MobileAdminCommandCenter() {
     setEditSlotForm({
       company_name: slot.company_name || '',
       round_type: isCustom ? 'Custom' : slot.round_type,
-      scheduled_date: slot.scheduled_date || '2026-10-21',
-      scheduled_time: slot.scheduled_time || '02:30 PM IST',
+      scheduled_date: slot.scheduled_date || getTodayDateStr(),
+      scheduled_time: slot.scheduled_time || DEFAULT_SLOT_TIME,
       meeting_link: slot.meeting_link || '',
       status: slot.status || 'requested',
       round_fee: slot.round_fee ? String(slot.round_fee) : '',
@@ -925,8 +955,8 @@ export default function MobileAdminCommandCenter() {
         company_name: '',
         round_type: 'Technical Coding L1',
         round_fee: '₹3,000',
-        scheduled_date: '2026-10-21',
-        scheduled_time: '02:30 PM IST',
+        scheduled_date: getTodayDateStr(),
+        scheduled_time: DEFAULT_SLOT_TIME,
       });
       setSelectedRegisteredClientId('');
       setIsEmergencyCustomRound(false);
@@ -1474,7 +1504,7 @@ export default function MobileAdminCommandCenter() {
                                   </div>
 
                                   <div className="text-right shrink-0 space-y-1.5">
-                                    <div className="flex items-center justify-end gap-1">
+                                    <div className="flex items-center justify-end gap-1.5 flex-wrap">
                                       <button
                                         type="button"
                                         onClick={() => handleOpenEditSlotModal(slot)}
@@ -1485,19 +1515,52 @@ export default function MobileAdminCommandCenter() {
                                         <span>Edit</span>
                                       </button>
 
-                                      <button
-                                        type="button"
-                                        onClick={() => handleCycleSlotStatus(slot.id)}
-                                        className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded transition-colors ${
+                                      {slot.status !== 'approved' && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSetSlotStatus(slot.id, 'approved')}
+                                          className="px-2 py-1 rounded bg-emerald-500 text-black hover:bg-emerald-400 text-[10px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                                          title="Approve & Confirm Slot for Live Bookings"
+                                        >
+                                          <Check className="w-3 h-3 stroke-[3]" />
+                                          <span>Approve</span>
+                                        </button>
+                                      )}
+
+                                      {slot.status !== 'declined' && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSetSlotStatus(slot.id, 'declined')}
+                                          className="px-1.5 py-1 rounded bg-zinc-900 text-zinc-400 hover:text-red-400 hover:bg-red-500/10 border border-zinc-800 hover:border-red-500/30 text-[10px] font-bold transition-colors cursor-pointer"
+                                          title="Decline Slot"
+                                        >
+                                          <span>Decline</span>
+                                        </button>
+                                      )}
+
+                                      <select
+                                        value={slot.status}
+                                        onChange={(e) =>
+                                          handleSetSlotStatus(
+                                            slot.id,
+                                            e.target.value as DatabaseInterviewSlot['status']
+                                          )
+                                        }
+                                        className={`text-[10px] font-bold px-2 py-0.5 rounded border bg-black cursor-pointer focus:outline-none transition-colors ${
                                           slot.status === 'approved'
-                                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                                             : slot.status === 'rescheduled'
-                                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                                            : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                                            ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                                            : slot.status === 'declined'
+                                            ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                                            : 'bg-zinc-900 text-zinc-300 border-zinc-700'
                                         }`}
                                       >
-                                        {slot.status} ↺
-                                      </button>
+                                        <option value="approved">✓ Approved</option>
+                                        <option value="requested">⏳ Pending Approval</option>
+                                        <option value="rescheduled">🔄 Rescheduled</option>
+                                        <option value="declined">✕ Declined</option>
+                                      </select>
 
                                       <button
                                         type="button"
@@ -2310,7 +2373,7 @@ export default function MobileAdminCommandCenter() {
                   Interview Date *
                 </label>
                 <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
-                  {getUpcomingAdminDates().map(({ dateStr, label, dayName }) => {
+                  {upcomingDates.map(({ dateStr, label, dayName }) => {
                     const isSelected = dateStr === emergencyForm.scheduled_date;
                     const dayBookingsCount = slots.filter(
                       (s) =>
@@ -2346,6 +2409,22 @@ export default function MobileAdminCommandCenter() {
                       </button>
                     );
                   })}
+                </div>
+
+                {/* Manual Date Input */}
+                <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-800/80">
+                  <span className="text-zinc-400 font-medium">Or enter date manually:</span>
+                  <input
+                    type="date"
+                    min={todayStr || undefined}
+                    value={emergencyForm.scheduled_date}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setEmergencyForm((prev) => ({ ...prev, scheduled_date: e.target.value }));
+                      }
+                    }}
+                    className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
+                  />
                 </div>
               </div>
 
@@ -2390,6 +2469,20 @@ export default function MobileAdminCommandCenter() {
                       );
                     }
                   )}
+                </div>
+
+                {/* Manual Time Input */}
+                <div className="flex items-center justify-between text-[11px] pt-2 border-t border-zinc-800/80 gap-2">
+                  <span className="text-zinc-400 font-medium shrink-0">Or enter custom time:</span>
+                  <input
+                    type="text"
+                    value={emergencyForm.scheduled_time}
+                    onChange={(e) =>
+                      setEmergencyForm((prev) => ({ ...prev, scheduled_time: e.target.value }))
+                    }
+                    placeholder="e.g. 04:30 PM IST"
+                    className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none flex-1 max-w-[180px] text-right placeholder:text-zinc-600"
+                  />
                 </div>
               </div>
 
@@ -2911,7 +3004,7 @@ export default function MobileAdminCommandCenter() {
                     Detected Verification Signals
                   </label>
                   <div className="flex flex-wrap gap-1.5">
-                    {viewingProofSlot.proof.signals.map((sig, idx) => (
+                    {viewingProofSlot.proof.signals.map((sig: string, idx: number) => (
                       <span
                         key={idx}
                         className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-md font-semibold"

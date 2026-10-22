@@ -26,7 +26,10 @@ export function parseSlotProof(jdText?: string | null): SlotProofMetadata {
       const parsed = JSON.parse(trimmed);
       const expiresAt = parsed.expires_at || parsed.screenshot_storage?.expires_at;
       const uploadedAt = parsed.uploaded_at || parsed.screenshot_storage?.uploaded_at;
-      const isExpired = expiresAt ? Date.now() > new Date(expiresAt).getTime() : false;
+      const isExpired =
+        expiresAt && typeof window !== 'undefined'
+          ? Date.now() > new Date(expiresAt).getTime()
+          : false;
       const preview =
         parsed.screenshot_preview ||
         parsed.screenshot_storage?.preview_data_url ||

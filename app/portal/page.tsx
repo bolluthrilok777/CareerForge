@@ -34,6 +34,7 @@ import {
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
 import { parseSlotProof, serializeSlotProof } from '@/lib/inviteProof';
+import { getUpcomingDates, getTodayDateStr, DEFAULT_SLOT_TIME, useLiveUpcomingDates } from '@/lib/dates';
 
 // Production Client & Cohort State
 const FALLBACK_CLIENTS: DatabaseClient[] = [];
@@ -49,20 +50,6 @@ function timeToMinutes(timeStr: string): number {
   if (meridiem === 'PM' && hours < 12) hours += 12;
   if (meridiem === 'AM' && hours === 12) hours = 0;
   return hours * 60 + minutes;
-}
-
-function getUpcomingDates(): { dateStr: string; label: string; dayName: string }[] {
-  const dates = [];
-  const base = new Date('2026-10-18T12:00:00Z');
-  for (let i = 0; i < 10; i++) {
-    const d = new Date(base);
-    d.setDate(base.getDate() + i);
-    const dateStr = d.toISOString().split('T')[0];
-    const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-    const label = d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
-    dates.push({ dateStr, label, dayName });
-  }
-  return dates;
 }
 
 export default function CandidatePortal() {
@@ -97,8 +84,8 @@ export default function CandidatePortal() {
   const [slotForm, setSlotForm] = useState({
     company_name: '',
     round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '02:30 PM IST',
+    scheduled_date: '',
+    scheduled_time: DEFAULT_SLOT_TIME,
     jd_text: '',
   });
 
@@ -107,8 +94,8 @@ export default function CandidatePortal() {
   const [editMySlotForm, setEditMySlotForm] = useState({
     company_name: '',
     round_type: 'Technical Coding L1',
-    scheduled_date: '2026-10-21',
-    scheduled_time: '02:30 PM IST',
+    scheduled_date: '',
+    scheduled_time: DEFAULT_SLOT_TIME,
     jd_text: '',
   });
   const [isEditMySlotCustomRound, setIsEditMySlotCustomRound] = useState(false);
@@ -193,7 +180,26 @@ export default function CandidatePortal() {
   useEffect(() => {
     loadPortalData();
 
-    // Real-time synchronization with Admin Portal
+    // 1. Supabase Postgres Realtime Subscription for cross-device & instant sync
+    const realtimeChannel = supabase
+      .channel('portal_realtime_interview_slots')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'interview_slots' },
+        () => {
+          loadPortalData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'clients' },
+        () => {
+          loadPortalData();
+        }
+      )
+      .subscribe();
+
+    // 2. Real-time synchronization with Admin Portal via BroadcastChannel
     const unsubscribe = subscribeToSync((msg) => {
       loadPortalData();
       if (msg.type === 'RESUME_UPDATED') {
@@ -206,6 +212,7 @@ export default function CandidatePortal() {
     });
 
     return () => {
+      supabase.removeChannel(realtimeChannel);
       unsubscribe();
     };
   }, [currentClient?.id]);
@@ -225,8 +232,8 @@ export default function CandidatePortal() {
     setEditMySlotForm({
       company_name: slot.company_name || '',
       round_type: isCustom ? 'Custom' : slot.round_type,
-      scheduled_date: slot.scheduled_date || '2026-10-21',
-      scheduled_time: slot.scheduled_time || '02:30 PM IST',
+      scheduled_date: slot.scheduled_date || getTodayDateStr(),
+      scheduled_time: slot.scheduled_time || DEFAULT_SLOT_TIME,
       jd_text: slot.jd_text || '',
     });
     setEditMySlotError(null);
@@ -527,8 +534,8 @@ export default function CandidatePortal() {
       setSlotForm({
         company_name: '',
         round_type: 'Technical Coding L1',
-        scheduled_date: '2026-10-21',
-        scheduled_time: '02:30 PM IST',
+        scheduled_date: getTodayDateStr(),
+        scheduled_time: DEFAULT_SLOT_TIME,
         jd_text: '',
       });
       handleRemoveScreenshot();
@@ -639,8 +646,15 @@ export default function CandidatePortal() {
   };
 
   const mySlots = allSlots.filter((s) => s.client_id === currentClient?.id);
-  const upcomingDates = getUpcomingDates();
-  const confirmedSlotsOnDate = allSlots.filter((s) => s.scheduled_date === slotForm.scheduled_date);
+  const liveConfirmedSlots = allSlots.filter((s) => s.status === 'approved');
+  const { upcomingDates, todayStr } = useLiveUpcomingDates();
+  const confirmedSlotsOnDate = liveConfirmedSlots.filter((s) => s.scheduled_date === slotForm.scheduled_date);
+
+  useEffect(() => {
+    if (todayStr) {
+      setSlotForm((prev) => (prev.scheduled_date ? prev : { ...prev, scheduled_date: todayStr }));
+    }
+  }, [todayStr]);
 
   const profilesStatus = currentClient?.naukri_status || currentClient?.profiles_status || 'in_progress';
 
@@ -1008,19 +1022,19 @@ export default function CandidatePortal() {
         <section className="space-y-2">
           <div className="flex items-center justify-between px-1">
             <h2 className="text-sm font-extrabold text-white">
-              Confirmed Cohort Slots ({allSlots.length})
+              Confirmed Cohort Slots ({liveConfirmedSlots.length})
             </h2>
             <span className="text-xs text-zinc-400 font-medium">Live Bookings</span>
           </div>
 
           <div className="bg-[#111113] border border-zinc-800 rounded-2xl p-4">
-            {allSlots.length === 0 ? (
+            {liveConfirmedSlots.length === 0 ? (
               <div className="text-center py-4 text-xs text-zinc-500">
-                No active cohort slots scheduled yet.
+                No active confirmed cohort slots scheduled yet.
               </div>
             ) : (
               <div className="divide-y divide-zinc-800">
-                {allSlots.map((slot) => {
+                {liveConfirmedSlots.map((slot) => {
                   const isMine = slot.client_id === currentClient.id;
                   const candName =
                     slot.candidate_name ||
@@ -1298,6 +1312,22 @@ export default function CandidatePortal() {
                     );
                   })}
                 </div>
+
+                {/* Manual Date Input */}
+                <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-800/80">
+                  <span className="text-zinc-400 font-medium">Or enter date manually:</span>
+                  <input
+                    type="date"
+                    min={todayStr || undefined}
+                    value={slotForm.scheduled_date}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setSlotForm((prev) => ({ ...prev, scheduled_date: e.target.value }));
+                      }
+                    }}
+                    className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
+                  />
+                </div>
               </div>
 
               {/* Inline Time Slot Selector */}
@@ -1347,6 +1377,18 @@ export default function CandidatePortal() {
                       );
                     }
                   )}
+                </div>
+
+                {/* Manual Time Input */}
+                <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-800/80 gap-2">
+                  <span className="text-zinc-400 font-medium shrink-0">Or enter time manually:</span>
+                  <input
+                    type="text"
+                    value={slotForm.scheduled_time}
+                    onChange={(e) => setSlotForm((prev) => ({ ...prev, scheduled_time: e.target.value }))}
+                    placeholder="e.g. 04:30 PM IST"
+                    className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none flex-1 max-w-[180px] text-right placeholder:text-zinc-600"
+                  />
                 </div>
 
                 {/* Conflict warning if the chosen time has a clash */}
@@ -1558,17 +1600,19 @@ export default function CandidatePortal() {
                   })}
                 </div>
 
-                <div className="flex items-center justify-between text-[11px] pt-0.5">
-                  <span className="text-zinc-500">Or pick other date:</span>
+                {/* Manual Date Input */}
+                <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-800/80">
+                  <span className="text-zinc-400 font-medium">Or enter date manually:</span>
                   <input
                     type="date"
+                    min={todayStr || undefined}
                     value={editMySlotForm.scheduled_date}
                     onChange={(e) => {
                       if (e.target.value) {
                         setEditMySlotForm((prev) => ({ ...prev, scheduled_date: e.target.value }));
                       }
                     }}
-                    className="bg-black border border-zinc-800 rounded-lg px-2 py-0.5 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
+                    className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
                   />
                 </div>
               </div>
@@ -1620,6 +1664,18 @@ export default function CandidatePortal() {
                       );
                     }
                   )}
+                </div>
+
+                {/* Manual Time Input */}
+                <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-800/80 gap-2">
+                  <span className="text-zinc-400 font-medium shrink-0">Or enter time manually:</span>
+                  <input
+                    type="text"
+                    value={editMySlotForm.scheduled_time}
+                    onChange={(e) => setEditMySlotForm((prev) => ({ ...prev, scheduled_time: e.target.value }))}
+                    placeholder="e.g. 04:30 PM IST"
+                    className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none flex-1 max-w-[180px] text-right placeholder:text-zinc-600"
+                  />
                 </div>
 
                 {/* Conflict warning if the chosen time has a clash */}

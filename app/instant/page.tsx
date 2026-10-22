@@ -30,23 +30,10 @@ import {
   STANDARD_TIME_SLOTS
 } from '@/lib/slotCollision';
 import { parseSlotProof, serializeSlotProof } from '@/lib/inviteProof';
-
-function getUpcomingDates(): { dateStr: string; label: string; dayName: string }[] {
-  const dates = [];
-  const base = new Date('2026-10-19T12:00:00Z');
-  for (let i = 0; i < 10; i++) {
-    const d = new Date(base);
-    d.setDate(base.getDate() + i);
-    const dateStr = d.toISOString().split('T')[0];
-    const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-    const label = d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
-    dates.push({ dateStr, label, dayName });
-  }
-  return dates;
-}
+import { getUpcomingDates, getTodayDateStr, DEFAULT_SLOT_TIME, useLiveUpcomingDates } from '@/lib/dates';
 
 export default function InstantEmergencyBookingPage() {
-  const upcomingDates = getUpcomingDates();
+  const { upcomingDates, todayStr } = useLiveUpcomingDates();
 
   const [fullName, setFullName] = useState('');
   const [whatsappNumber, setWhatsappNumber] = useState('');
@@ -54,9 +41,15 @@ export default function InstantEmergencyBookingPage() {
   const [roundType, setRoundType] = useState('Technical Coding L1');
   const [isCustomRound, setIsCustomRound] = useState(false);
   const [customRoundText, setCustomRoundText] = useState('');
-  const [selectedDate, setSelectedDate] = useState('2026-10-21');
-  const [selectedTime, setSelectedTime] = useState('02:30 PM IST');
+  const [selectedDate, setSelectedDate] = useState('');
+  const [selectedTime, setSelectedTime] = useState(DEFAULT_SLOT_TIME);
   const [jdNotes, setJdNotes] = useState('');
+
+  useEffect(() => {
+    if (todayStr) {
+      setSelectedDate((prev) => (prev ? prev : todayStr));
+    }
+  }, [todayStr]);
 
   // Real OCR Recruiter Invite Scanner (24-Hour retention)
   const [inviteFile, setInviteFile] = useState<File | null>(null);
@@ -105,6 +98,21 @@ export default function InstantEmergencyBookingPage() {
 
   useEffect(() => {
     fetchActiveSlots();
+
+    const channel = supabase
+      .channel('instant_realtime_slots')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'interview_slots' },
+        () => {
+          fetchActiveSlots();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   // Compute availability for current selected date
@@ -743,6 +751,22 @@ export default function InstantEmergencyBookingPage() {
                   );
                 })}
               </div>
+
+              {/* Manual Date Input */}
+              <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-800/80">
+                <span className="text-zinc-400 font-medium">Or enter date manually:</span>
+                <input
+                  type="date"
+                  min={todayStr || undefined}
+                  value={selectedDate}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      setSelectedDate(e.target.value);
+                    }
+                  }}
+                  className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
             </div>
 
             {/* Common Booked Schedule for Selected Date (No type badges shown to candidates) */}
@@ -829,6 +853,18 @@ export default function InstantEmergencyBookingPage() {
                     </button>
                   );
                 })}
+              </div>
+
+              {/* Manual Time Input */}
+              <div className="flex items-center justify-between text-[11px] pt-2 border-t border-zinc-800/80 gap-2">
+                <span className="text-zinc-400 font-medium shrink-0">Or enter custom time:</span>
+                <input
+                  type="text"
+                  value={selectedTime}
+                  onChange={(e) => setSelectedTime(e.target.value)}
+                  placeholder="e.g. 04:30 PM IST"
+                  className="bg-black border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:border-zinc-500 focus:outline-none flex-1 max-w-[180px] text-right placeholder:text-zinc-600"
+                />
               </div>
             </div>
 
