@@ -207,7 +207,7 @@ export default function CandidatePortal() {
       } else if (msg.type === 'CLIENT_UPDATED') {
         showToast('Your Job Profiles status was updated.');
       } else if (msg.type === 'SLOT_UPDATED') {
-        showToast('Your interview prep status was confirmed.');
+        showToast('Your interview prep status was updated.');
       }
     });
 
@@ -973,6 +973,8 @@ export default function CandidatePortal() {
                             className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border shrink-0 text-center ${
                               slot.status === 'approved'
                                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                                : slot.status === 'declined'
+                                ? 'bg-red-500/10 text-red-400 border-red-500/30'
                                 : slot.status === 'rescheduled'
                                 ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
                                 : 'bg-zinc-800 text-zinc-300 border-zinc-700'
@@ -980,6 +982,8 @@ export default function CandidatePortal() {
                           >
                             {slot.status === 'approved'
                               ? 'Approved'
+                              : slot.status === 'declined'
+                              ? 'Declined'
                               : slot.status === 'rescheduled'
                               ? 'Rescheduled (Pending)'
                               : 'Pending Approval'}
@@ -987,7 +991,7 @@ export default function CandidatePortal() {
                         </div>
                       </div>
 
-                      {slot.meeting_link && (
+                      {slot.status === 'approved' && slot.meeting_link && (
                         <div className="flex items-center gap-2 text-xs text-emerald-300 bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/20">
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                           <span>
@@ -1001,6 +1005,13 @@ export default function CandidatePortal() {
                               Join Video Call
                             </a>
                           </span>
+                        </div>
+                      )}
+
+                      {slot.status === 'declined' && (
+                        <div className="flex items-center gap-2 text-xs text-red-300 bg-red-500/10 p-2.5 rounded-xl border border-red-500/20">
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                          <span>Slot was declined by mentor/admin. Click Reschedule to select an alternate time.</span>
                         </div>
                       )}
 

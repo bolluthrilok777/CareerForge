@@ -611,30 +611,58 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
-  // Slots Management
-  const handleCycleSlotStatus = async (slotId: string) => {
+  // Slots Management: 3-State Cycle (requested -> approved -> declined -> requested)
+  const handleToggleSlotStatus = async (slotId: string) => {
     const slot = slots.find((s) => s.id === slotId);
     if (!slot) return;
 
-    const statuses: DatabaseInterviewSlot['status'][] = ['requested', 'approved', 'rescheduled', 'declined'];
-    const idx = statuses.indexOf(slot.status);
-    const nextStatus = statuses[(idx + 1) % statuses.length];
+    let nextStatus: DatabaseInterviewSlot['status'] = 'approved';
+    if (slot.status === 'approved') {
+      nextStatus = 'declined';
+    } else if (slot.status === 'declined') {
+      nextStatus = 'requested';
+    } else {
+      nextStatus = 'approved';
+    }
 
     try {
-      await supabase
+      const { data, error } = await supabase
         .from('interview_slots')
         .update({ status: nextStatus })
-        .eq('id', slotId);
+        .eq('id', slotId)
+        .select('*, client:clients(*)');
 
+      if (error) {
+        console.error('Error updating slot status:', error);
+        showToast(`Failed to update status: ${error.message}`);
+        return;
+      }
+
+      const updated = data && data[0] ? data[0] : null;
+
+      setSlots((prev) =>
+        prev.map((s) =>
+          s.id === slotId
+            ? updated
+              ? { ...s, ...updated }
+              : { ...s, status: nextStatus }
+            : s
+        )
+      );
+      broadcastSync('SLOT_UPDATED', { slotId, status: nextStatus });
+      showToast(
+        nextStatus === 'approved'
+          ? 'Slot approved (Live in cohort)'
+          : nextStatus === 'declined'
+          ? 'Slot declined'
+          : 'Slot reset to pending approval'
+      );
+    } catch (err: unknown) {
+      console.error('Network error setting slot status:', err);
       setSlots((prev) =>
         prev.map((s) => (s.id === slotId ? { ...s, status: nextStatus } : s))
       );
       broadcastSync('SLOT_UPDATED', { slotId, status: nextStatus });
-      showToast(`Slot status: ${nextStatus}`);
-    } catch {
-      setSlots((prev) =>
-        prev.map((s) => (s.id === slotId ? { ...s, status: nextStatus } : s))
-      );
       showToast(`Slot status: ${nextStatus}`);
     }
   };
@@ -1045,11 +1073,10 @@ export default function MobileAdminCommandCenter() {
     }
   };
 
-  // Header Analytics (Zero Currency Amounts)
-  const currentMonthYear = '2026-10';
-  const clientsThisMonth = clients.filter((c) => (c.created_at || '').startsWith(currentMonthYear)).length;
-  const leadsThisMonth = leads.filter((l) => (l.created_at || '').startsWith(currentMonthYear)).length;
-  const totalClientsCount = clients.length;
+  // Header Analytics: Overall Operations Across All Time
+  const totalCandidatesCount = clients.length;
+  const totalLeadsCount = leads.length;
+  const totalInterviewsCount = slots.length;
   const registrationPaidCount = clients.filter((c) => c.fee_status === 'registration_paid_20k').length;
   const offerLockedCount = clients.filter((c) => c.fee_status === 'offer_locked' || c.fee_status === 'final_12_percent_paid').length;
 
@@ -1223,7 +1250,7 @@ export default function MobileAdminCommandCenter() {
         </button>
 
         {/* ======================================================== */}
-        {/* MAIN HEADER ANALYTICS (ZERO CURRENCY AMOUNTS SHOWN)      */}
+        {/* MAIN HEADER ANALYTICS (OVERALL OPERATIONS SUMMARY)        */}
         {/* ======================================================== */}
         <section className="bg-[#111113] border border-zinc-800 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80">
@@ -1231,34 +1258,34 @@ export default function MobileAdminCommandCenter() {
               Overview
             </h2>
             <span className="text-xs font-mono text-zinc-400 font-bold">
-              October 2026
+              Overall Summary
             </span>
           </div>
 
-          {/* Row 1: Monthly Inflow */}
+          {/* Row 1: Overall Operations Counts */}
           <div className="grid grid-cols-3 gap-2 text-center">
             <div className="bg-black/60 border border-zinc-800 rounded-xl p-2.5">
               <span className="block text-[10px] font-bold text-zinc-400 uppercase">
-                Clients (Mo.)
+                Total Candidates
               </span>
               <strong className="block text-xl font-extrabold font-mono text-white mt-0.5">
-                {clientsThisMonth}
+                {totalCandidatesCount}
               </strong>
             </div>
             <div className="bg-black/60 border border-zinc-800 rounded-xl p-2.5">
               <span className="block text-[10px] font-bold text-zinc-400 uppercase">
-                Leads (Mo.)
+                Total Leads
               </span>
               <strong className="block text-xl font-extrabold font-mono text-white mt-0.5">
-                {leadsThisMonth}
+                {totalLeadsCount}
               </strong>
             </div>
             <div className="bg-black/60 border border-zinc-800 rounded-xl p-2.5">
               <span className="block text-[10px] font-bold text-zinc-400 uppercase">
-                Total Clients
+                Total Interviews
               </span>
               <strong className="block text-xl font-extrabold font-mono text-white mt-0.5">
-                {totalClientsCount}
+                {totalInterviewsCount}
               </strong>
             </div>
           </div>
@@ -1273,18 +1300,18 @@ export default function MobileAdminCommandCenter() {
                 {registrationPaidCount}
               </strong>
               <span className="block text-[10px] text-emerald-400/80 mt-0.5 font-medium">
-                Converted to Candidate
+                Enrolled Candidates
               </span>
             </div>
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-2.5">
               <span className="block text-[10px] font-extrabold text-amber-400 uppercase tracking-wide">
-                Offer Letter Cleared
+                Offer Stage Cleared
               </span>
               <strong className="block text-xl font-extrabold font-mono text-amber-300 mt-0.5">
                 {offerLockedCount}
               </strong>
               <span className="block text-[10px] text-amber-400/80 mt-0.5 font-medium">
-                Offer Stage Cleared
+                Offer Letter Cleared
               </span>
             </div>
           </div>
@@ -1503,72 +1530,53 @@ export default function MobileAdminCommandCenter() {
                                     </div>
                                   </div>
 
-                                  <div className="text-right shrink-0 space-y-1.5">
+                                  <div className="text-right shrink-0">
                                     <div className="flex items-center justify-end gap-1.5 flex-wrap">
                                       <button
                                         type="button"
                                         onClick={() => handleOpenEditSlotModal(slot)}
                                         title="Edit Interview Slot Details"
-                                        className="p-1 rounded bg-zinc-900 text-zinc-300 hover:text-white border border-zinc-800 text-[10px] font-bold flex items-center gap-1 transition-colors hover:border-zinc-700"
+                                        className="px-2.5 py-1 rounded-md bg-zinc-900 text-zinc-300 hover:text-white border border-zinc-800 text-[10px] font-bold flex items-center gap-1 transition-colors hover:border-zinc-700 cursor-pointer"
                                       >
                                         <Edit3 className="w-3 h-3 text-zinc-400" />
                                         <span>Edit</span>
                                       </button>
 
-                                      {slot.status !== 'approved' && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleSetSlotStatus(slot.id, 'approved')}
-                                          className="px-2 py-1 rounded bg-emerald-500 text-black hover:bg-emerald-400 text-[10px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
-                                          title="Approve & Confirm Slot for Live Bookings"
-                                        >
-                                          <Check className="w-3 h-3 stroke-[3]" />
-                                          <span>Approve</span>
-                                        </button>
-                                      )}
-
-                                      {slot.status !== 'declined' && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleSetSlotStatus(slot.id, 'declined')}
-                                          className="px-1.5 py-1 rounded bg-zinc-900 text-zinc-400 hover:text-red-400 hover:bg-red-500/10 border border-zinc-800 hover:border-red-500/30 text-[10px] font-bold transition-colors cursor-pointer"
-                                          title="Decline Slot"
-                                        >
-                                          <span>Decline</span>
-                                        </button>
-                                      )}
-
-                                      <select
-                                        value={slot.status}
-                                        onChange={(e) =>
-                                          handleSetSlotStatus(
-                                            slot.id,
-                                            e.target.value as DatabaseInterviewSlot['status']
-                                          )
-                                        }
-                                        className={`text-[10px] font-bold px-2 py-0.5 rounded border bg-black cursor-pointer focus:outline-none transition-colors ${
-                                          slot.status === 'approved'
-                                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                                            : slot.status === 'rescheduled'
-                                            ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                                            : slot.status === 'declined'
-                                            ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                                            : 'bg-zinc-900 text-zinc-300 border-zinc-700'
-                                        }`}
-                                      >
-                                        <option value="approved">✓ Approved</option>
-                                        <option value="requested">⏳ Pending Approval</option>
-                                        <option value="rescheduled">🔄 Rescheduled</option>
-                                        <option value="declined">✕ Declined</option>
-                                      </select>
-
+                                      {/* 3-State Status Toggle: Approve -> Approved -> Declined -> Approve */}
                                       <button
                                         type="button"
-                                        onClick={() => handleDeleteSlot(slot.id)}
-                                        className="p-1 text-zinc-500 hover:text-red-400"
-                                        title="Delete Slot"
+                                        onClick={() => handleToggleSlotStatus(slot.id)}
+                                        title={
+                                          slot.status === 'approved'
+                                            ? 'Currently Approved. Click to change to Declined.'
+                                            : slot.status === 'declined'
+                                            ? 'Currently Declined. Click to change to Approve.'
+                                            : 'Click to Approve.'
+                                        }
+                                        className={`px-2.5 py-1 rounded-md text-[10px] font-extrabold flex items-center gap-1 transition-all cursor-pointer border ${
+                                          slot.status === 'approved'
+                                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25'
+                                            : slot.status === 'declined'
+                                            ? 'bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25'
+                                            : 'bg-emerald-500 text-black border-transparent hover:bg-emerald-400 shadow-xs'
+                                        }`}
                                       >
-                                        <Trash2 className="w-3.5 h-3.5" />
+                                        {slot.status === 'approved' ? (
+                                          <>
+                                            <Check className="w-3 h-3 stroke-[3]" />
+                                            <span>Approved</span>
+                                          </>
+                                        ) : slot.status === 'declined' ? (
+                                          <>
+                                            <X className="w-3 h-3 stroke-[2.5]" />
+                                            <span>Declined</span>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Check className="w-3 h-3 stroke-[3]" />
+                                            <span>Approve</span>
+                                          </>
+                                        )}
                                       </button>
                                     </div>
                                   </div>
@@ -2919,15 +2927,29 @@ export default function MobileAdminCommandCenter() {
               <div className="flex gap-2 pt-2">
                 <button
                   type="button"
+                  onClick={() => {
+                    if (editingSlotModal) {
+                      handleDeleteSlot(editingSlotModal.id);
+                      setEditingSlotModal(null);
+                    }
+                  }}
+                  className="bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold text-xs py-2.5 px-3 rounded-xl transition-colors border border-red-500/30 flex items-center justify-center gap-1 cursor-pointer"
+                  title="Delete this interview slot"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => setEditingSlotModal(null)}
-                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800"
+                  className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold text-xs py-2.5 rounded-xl transition-colors border border-zinc-800 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isSavingSlotEdit || !editSlotForm.company_name.trim()}
-                  className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors disabled:opacity-50"
+                  className="flex-1 bg-white hover:bg-zinc-200 text-black font-extrabold text-xs py-2.5 rounded-xl transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   {isSavingSlotEdit ? 'Saving...' : 'Save Slot Changes'}
                 </button>
